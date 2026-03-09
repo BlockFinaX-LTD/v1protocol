@@ -1,0 +1,24 @@
+{
+  "standard": "EIP-2535 Diamond",
+  "network": "liskSepolia",
+  "chainId": 4202,
+  "diamond": "0x3582D8f5f88ef557ce10Af26834FAC8B8e1445bf",
+  "facets": {
+    "blockFinaXDiamondCut": "0x289eE379b00e3B20c4BaD64a525B0b0D123a7d0c",
+    "blockFinaXDiamondLoupe": "0xB13D148ccd95e045AB6b501ab8961c61b1c56d9d",
+    "blockFinaXHedge": "0x9Dc3eD28156Fd09D793489cd63f723B0e4224AD3"
+  },
+  "config": {
+    "usdcToken": "0xf52Ad63619Bf9cFeF510341ac6b4038554399562",
+    "hedgeFees": {
+      "eventCreationFee": "25000000",
+      "hedgerFeeRate": "5000",
+      "hedgerPayoutFeeRate": "10000",
+      "lpProfitFeeRate": "10000",
+      "creatorLoyaltyRate": "50000"
+    },
+    "oracleAdmin": "0xef5Bed7c221c85A2c88e3c0223ee45482d6F037d"
+  },
+  "deployer": "0xef5Bed7c221c85A2c88e3c0223ee45482d6F037d",
+  "timestamp": "2026-03-01T06:09:30.662Z"
+}
