@@ -15,36 +15,36 @@ library LibAppStorage {
         uint256 id;
         address creator;
         string name;
-        string underlying;       // e.g. "USD/GHS"
-        uint256 strike;          // Strike price (6 decimals, e.g. 16500000 = 16.5)
-        uint256 premiumRate;     // Premium rate (6 decimals, e.g. 25000 = 2.5%)
-        uint256 expiryDate;      // Unix timestamp
+        string underlying;
+        uint256 strike;
+        uint256 premiumRate;
+        uint256 expiryDate;
         HedgeEventStatus status;
-        uint256 settlementPrice; // Actual FX rate at settlement (6 decimals)
-        bool triggered;          // Did rate >= strike?
+        uint256 settlementPrice;
+        bool triggered;
         uint256 settledAt;
-        bool poolOpen;           // Can hedgers buy protection?
-        bool allowExternalLp;    // Can non-creators deposit liquidity?
-        uint256 creatorEarnings; // 5% of platform fees (USDC, 6 decimals)
-        uint256 totalLiquidity;  // Total USDC deposited by LPs
-        uint256 totalExposure;   // Sum of active position notionals (capacity reserved)
-        uint256 totalPremiums;   // All premiums collected
-        uint256 lpCount;         // Number of active LP deposits
-        uint256 hedgerCount;     // Number of active hedge positions
+        bool poolOpen;
+        bool allowExternalLp;
+        uint256 creatorEarnings;
+        uint256 totalLiquidity;
+        uint256 totalExposure;
+        uint256 totalPremiums;
+        uint256 lpCount;
+        uint256 hedgerCount;
         uint256 createdAt;
-        uint256 initialRate;     // FX rate at event creation (6 decimals) — used to calculate predetermined payout
-        uint256 totalMaxPayout;  // Sum of all position predetermined payouts (reserved from pool)
-        bool strikeAbove;        // true = hedger wins when price rises to strike; false = hedger wins when price falls to strike
+        uint256 initialRate;
+        uint256 totalMaxPayout;
+        bool strikeAbove;
     }
 
     struct HedgePosition {
         uint256 id;
         uint256 eventId;
         address hedger;
-        uint256 notional;        // Coverage amount (USDC, 6 decimals)
-        uint256 premiumPaid;     // Premium paid to LPs (USDC, 6 decimals)
-        uint256 platformFeePaid; // 0.5% fee paid to platform (USDC, 6 decimals)
-        uint256 payoutAmount;    // Calculated at settlement (USDC, 6 decimals)
+        uint256 notional;
+        uint256 premiumPaid;
+        uint256 platformFeePaid;
+        uint256 payoutAmount;
         HedgePositionStatus status;
         bool claimed;
         uint256 createdAt;
@@ -54,21 +54,21 @@ library LibAppStorage {
         uint256 id;
         uint256 eventId;
         address lp;
-        uint256 amount;          // USDC deposited (6 decimals)
-        uint256 shares;          // Pool share units (18 decimals for precision)
-        uint256 premiumsEarned;  // Running total earned (USDC, 6 decimals)
-        uint256 premiumsClaimed; // Already claimed (USDC, 6 decimals)
-        bool withdrawn;          // Has LP taken capital back?
+        uint256 amount;
+        uint256 shares;
+        uint256 premiumsEarned;
+        uint256 premiumsClaimed;
+        bool withdrawn;
         uint256 withdrawnAt;
         uint256 createdAt;
     }
 
     struct HedgeFeeConfig {
-        uint256 eventCreationFee;    // Flat fee to create event (USDC, 6 decimals) — default 25e6
-        uint256 hedgerFeeRate;       // % of notional charged to hedger (6 decimals) — 5000 = 0.5%
-        uint256 hedgerPayoutFeeRate; // % of payout deducted on claim (6 decimals) — 10000 = 1%
-        uint256 lpProfitFeeRate;     // % of LP premium claim deducted (6 decimals) — 10000 = 1%
-        uint256 creatorLoyaltyRate;  // % of platform fees to creator (6 decimals) — 50000 = 5%
+        uint256 eventCreationFee;
+        uint256 hedgerFeeRate;
+        uint256 hedgerPayoutFeeRate;
+        uint256 lpProfitFeeRate;
+        uint256 creatorLoyaltyRate;
     }
 
     struct AppStorage {
@@ -98,6 +98,19 @@ library LibAppStorage {
         uint256 hedgePlatformFeesCollected;
 
         address hedgeOracleAdmin;
+
+        // ============================================================
+        //                    SECURITY FLAGS
+        // ============================================================
+
+        /// @dev Reentrancy lock — set true while a state-changing function executes
+        bool hedgeReentrancyLock;
+
+        /// @dev Emergency pause — all hedger/LP state-changing functions blocked when true
+        bool paused;
+
+        /// @dev Set to true when initializeHedgeFees() is called; required before createEvent()
+        bool feesInitialized;
     }
 
     function appStorage() internal pure returns (AppStorage storage s) {

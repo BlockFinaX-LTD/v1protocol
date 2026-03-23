@@ -12,6 +12,8 @@ library LibDiamond {
         address[] facetAddresses;
         mapping(bytes4 => bool) supportedInterfaces;
         address contractOwner;
+        /// @dev Two-step ownership: proposed new owner must call acceptOwnership()
+        address pendingOwner;
     }
 
     function diamondStorage() internal pure returns (DiamondStorage storage ds) {
@@ -22,7 +24,9 @@ library LibDiamond {
     }
 
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferStarted(address indexed currentOwner, address indexed pendingOwner);
 
+    /// @dev Used only by the Diamond constructor — sets owner directly, no two-step.
     function setContractOwner(address _newOwner) internal {
         DiamondStorage storage ds = diamondStorage();
         address previousOwner = ds.contractOwner;
@@ -30,8 +34,30 @@ library LibDiamond {
         emit OwnershipTransferred(previousOwner, _newOwner);
     }
 
+    /// @dev Propose a new owner. The new owner must call acceptOwnership() to confirm.
+    function transferOwnership(address _newOwner) internal {
+        require(_newOwner != address(0), "LibDiamond: New owner is zero address");
+        DiamondStorage storage ds = diamondStorage();
+        ds.pendingOwner = _newOwner;
+        emit OwnershipTransferStarted(ds.contractOwner, _newOwner);
+    }
+
+    /// @dev Called by pendingOwner to accept and finalise the ownership transfer.
+    function acceptOwnership() internal {
+        DiamondStorage storage ds = diamondStorage();
+        require(msg.sender == ds.pendingOwner, "LibDiamond: Not pending owner");
+        address previousOwner = ds.contractOwner;
+        ds.contractOwner = ds.pendingOwner;
+        ds.pendingOwner = address(0);
+        emit OwnershipTransferred(previousOwner, ds.contractOwner);
+    }
+
     function contractOwner() internal view returns (address contractOwner_) {
         contractOwner_ = diamondStorage().contractOwner;
+    }
+
+    function pendingOwner() internal view returns (address pendingOwner_) {
+        pendingOwner_ = diamondStorage().pendingOwner;
     }
 
     function enforceIsContractOwner() internal view {
@@ -63,7 +89,7 @@ library LibDiamond {
 
     function addFunctions(address _facetAddress, bytes4[] memory _functionSelectors) internal {
         require(_functionSelectors.length > 0, "LibDiamondCut: No selectors in facet to cut");
-        DiamondStorage storage ds = diamondStorage();        
+        DiamondStorage storage ds = diamondStorage();
         require(_facetAddress != address(0), "LibDiamondCut: Add facet can't be address(0)");
         uint96 selectorPosition = uint96(ds.facetFunctionSelectors[_facetAddress].length);
         if (selectorPosition == 0) {
@@ -107,7 +133,7 @@ library LibDiamond {
         ds.facetAddresses.push(_facetAddress);
     }
 
-    function removeFunction(DiamondStorage storage ds, address _facetAddress, bytes4 _selector) internal {        
+    function removeFunction(DiamondStorage storage ds, address _facetAddress, bytes4 _selector) internal {
         require(_facetAddress != address(0), "LibDiamondCut: Can't remove function that doesn't exist");
         bytes4[] storage selectors = ds.facetFunctionSelectors[_facetAddress];
         uint256 selectorPosition;
@@ -129,7 +155,7 @@ library LibDiamond {
         if (_init == address(0)) {
             return;
         }
-        enforceHasContractCode(_init, "LibDiamondCut: _init address has no code");        
+        enforceHasContractCode(_init, "LibDiamondCut: _init address has no code");
         (bool success, bytes memory error) = _init.delegatecall(_calldata);
         if (!success) {
             if (error.length > 0) {

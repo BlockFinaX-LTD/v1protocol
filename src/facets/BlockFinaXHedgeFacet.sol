@@ -7,7 +7,7 @@ import {LibAppStorage} from "../libraries/LibAppStorage.sol";
 import {LibDiamond} from "../libraries/LibDiamond.sol";
 
 /**
- * @title HedgeFacet
+ * @title BlockFinaXHedgeFacet
  * @notice On-chain P2P Hedge — FX protection marketplace
  *
  * Lifecycle:
@@ -27,6 +27,15 @@ import {LibDiamond} from "../libraries/LibDiamond.sol";
  *   - LP profit fee: 1% of premium claim (deducted at claim)
  *   - Creator loyalty: 5% of every platform fee → event creator
  *
+ * Security:
+ *   - nonReentrant on all state-changing user functions
+ *   - CEI (Check-Effects-Interactions) ordering throughout
+ *   - Emergency pause via pause()/unpause()
+ *   - Two-step ownership transfer (propose + accept)
+ *   - Bounded loops: MAX_POSITIONS_PER_EVENT = 500, MAX_DEPOSITS_PER_EVENT = 200
+ *   - Fee initialization guard — createEvent() reverts until initializeHedgeFees() called
+ *   - Max expiry 365 days, max premiumRate 100% (PRECISION)
+ *
  * All USDC is held by the Diamond contract. No external treasury wallet needed.
  */
 contract BlockFinaXHedgeFacet {
@@ -34,6 +43,12 @@ contract BlockFinaXHedgeFacet {
 
     uint256 constant PRECISION = 1e6;
     uint256 constant SHARES_PRECISION = 1e18;
+
+    /// @dev Maximum hedger positions per event — caps settleEvent() loop gas cost
+    uint256 constant MAX_POSITIONS_PER_EVENT = 500;
+
+    /// @dev Maximum LP deposits per event — caps _distributePremiumToLps() loop gas cost
+    uint256 constant MAX_DEPOSITS_PER_EVENT = 200;
 
     // ============================================================
     //                          EVENTS
@@ -112,6 +127,19 @@ contract BlockFinaXHedgeFacet {
         uint256 amount
     );
 
+    event FeesInitialized(
+        uint256 eventCreationFee,
+        uint256 hedgerFeeRate,
+        uint256 hedgerPayoutFeeRate,
+        uint256 lpProfitFeeRate,
+        uint256 creatorLoyaltyRate
+    );
+
+    event OracleAdminSet(address indexed admin);
+    event Paused(address indexed by);
+    event Unpaused(address indexed by);
+    event ETHRescued(address indexed to, uint256 amount);
+
     // ============================================================
     //                       MODIFIERS
     // ============================================================
@@ -130,12 +158,29 @@ contract BlockFinaXHedgeFacet {
         _;
     }
 
+    /// @dev Diamond-compatible reentrancy guard using AppStorage slot
+    modifier nonReentrant() {
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        require(!s.hedgeReentrancyLock, "Reentrant call");
+        s.hedgeReentrancyLock = true;
+        _;
+        s.hedgeReentrancyLock = false;
+    }
+
+    /// @dev Emergency circuit breaker — blocks all user-facing state changes
+    modifier whenNotPaused() {
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        require(!s.paused, "Protocol is paused");
+        _;
+    }
+
     // ============================================================
     //                    ADMIN FUNCTIONS
     // ============================================================
 
     /**
-     * @notice Initialize hedge fee configuration (call once after deployment)
+     * @notice Initialize hedge fee configuration (must be called before createEvent())
+     * @dev Calling again overwrites the previous config — owner only.
      */
     function initializeHedgeFees(
         uint256 _eventCreationFee,
@@ -144,6 +189,11 @@ contract BlockFinaXHedgeFacet {
         uint256 _lpProfitFeeRate,
         uint256 _creatorLoyaltyRate
     ) external onlyOwner {
+        require(_hedgerFeeRate <= PRECISION, "hedgerFeeRate > 100%");
+        require(_hedgerPayoutFeeRate <= PRECISION, "hedgerPayoutFeeRate > 100%");
+        require(_lpProfitFeeRate <= PRECISION, "lpProfitFeeRate > 100%");
+        require(_creatorLoyaltyRate <= PRECISION, "creatorLoyaltyRate > 100%");
+
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         s.hedgeFeeConfig = LibAppStorage.HedgeFeeConfig({
             eventCreationFee: _eventCreationFee,
@@ -152,20 +202,73 @@ contract BlockFinaXHedgeFacet {
             lpProfitFeeRate: _lpProfitFeeRate,
             creatorLoyaltyRate: _creatorLoyaltyRate
         });
+        s.feesInitialized = true;
+
+        emit FeesInitialized(
+            _eventCreationFee,
+            _hedgerFeeRate,
+            _hedgerPayoutFeeRate,
+            _lpProfitFeeRate,
+            _creatorLoyaltyRate
+        );
     }
 
     /**
-     * @notice Set oracle admin address (can post settlement prices)
+     * @notice Set oracle admin address (can post settlement prices via single-key path)
      */
     function setOracleAdmin(address _admin) external onlyOwner {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         s.hedgeOracleAdmin = _admin;
+        emit OracleAdminSet(_admin);
+    }
+
+    /**
+     * @notice Propose a new owner. The new owner must call acceptOwnership() to confirm.
+     * @dev Two-step transfer prevents accidentally locking out the owner.
+     */
+    function transferOwnership(address _newOwner) external onlyOwner {
+        LibDiamond.transferOwnership(_newOwner);
+    }
+
+    /**
+     * @notice Accept ownership — must be called by the pending owner.
+     */
+    function acceptOwnership() external {
+        LibDiamond.acceptOwnership();
+    }
+
+    /**
+     * @notice Return the address of the proposed new owner (pending confirmation).
+     */
+    function pendingOwner() external view returns (address) {
+        return LibDiamond.pendingOwner();
+    }
+
+    /**
+     * @notice Pause all user-facing state-changing functions.
+     * @dev Use in emergencies. Oracle admin can still settle events while paused.
+     */
+    function pause() external onlyOwner {
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        require(!s.paused, "Already paused");
+        s.paused = true;
+        emit Paused(msg.sender);
+    }
+
+    /**
+     * @notice Unpause the protocol.
+     */
+    function unpause() external onlyOwner {
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        require(s.paused, "Not paused");
+        s.paused = false;
+        emit Unpaused(msg.sender);
     }
 
     /**
      * @notice Withdraw accumulated platform fees
      */
-    function withdrawPlatformFees(uint256 _amount) external onlyOwner {
+    function withdrawPlatformFees(uint256 _amount) external onlyOwner nonReentrant {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         require(_amount <= s.hedgePlatformFeesCollected, "Exceeds collected fees");
 
@@ -173,6 +276,31 @@ contract BlockFinaXHedgeFacet {
         IERC20(s.usdcToken).safeTransfer(msg.sender, _amount);
 
         emit PlatformFeesWithdrawn(msg.sender, _amount);
+    }
+
+    /**
+     * @notice Rescue any ETH accidentally sent to the Diamond.
+     * @dev ETH has no legitimate use in this contract (USDC only).
+     */
+    function rescueETH(address payable _to) external onlyOwner {
+        require(_to != address(0), "Zero address");
+        uint256 balance = address(this).balance;
+        require(balance > 0, "No ETH to rescue");
+        (bool ok, ) = _to.call{value: balance}("");
+        require(ok, "ETH transfer failed");
+        emit ETHRescued(_to, balance);
+    }
+
+    // ============================================================
+    //                    VIEW: PROTOCOL STATE
+    // ============================================================
+
+    function isPaused() external view returns (bool) {
+        return LibAppStorage.appStorage().paused;
+    }
+
+    function isFeesInitialized() external view returns (bool) {
+        return LibAppStorage.appStorage().feesInitialized;
     }
 
     // ============================================================
@@ -184,8 +312,8 @@ contract BlockFinaXHedgeFacet {
      * @param _name Human-readable name
      * @param _underlying Currency pair, e.g. "USD/GHS"
      * @param _strike Trigger price (6 decimals)
-     * @param _premiumRate Premium as percentage (6 decimals, e.g. 25000 = 2.5%)
-     * @param _expiryDate Unix timestamp when event expires
+     * @param _premiumRate Premium as fraction of notional (6 decimals, max = PRECISION = 100%)
+     * @param _expiryDate Unix timestamp when event expires (max 365 days from now)
      * @param _allowExternalLp Whether non-creators can deposit
      * @param _initialLiquidity USDC amount for initial deposit (6 decimals, min 10e6)
      */
@@ -198,31 +326,44 @@ contract BlockFinaXHedgeFacet {
         bool allowExternalLp;
         uint256 initialLiquidity;
         uint256 initialRate;
-        bool strikeAbove; // true = hedge against price rise; false = hedge against price fall
+        bool strikeAbove;
     }
 
-    function createEvent(CreateEventParams memory _params) external returns (uint256) {
+    function createEvent(CreateEventParams memory _params)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (uint256)
+    {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
 
+        // --- Checks ---
+        require(s.feesInitialized, "Fees not initialized: call initializeHedgeFees first");
         require(bytes(_params.name).length > 0, "Name required");
         require(bytes(_params.underlying).length > 0, "Underlying required");
         require(_params.strike > 0, "Strike must be > 0");
         require(_params.premiumRate > 0, "Premium rate must be > 0");
+        require(_params.premiumRate <= PRECISION, "Premium rate cannot exceed 100%");
         require(_params.expiryDate > block.timestamp, "Expiry must be in future");
+        require(
+            _params.expiryDate <= block.timestamp + 365 days,
+            "Expiry cannot exceed 365 days from now"
+        );
         require(_params.initialLiquidity >= 10 * PRECISION, "Min initial liquidity: 10 USDC");
         require(_params.initialRate > 0, "Initial rate must be > 0");
         if (_params.strikeAbove) {
-            require(_params.strike > _params.initialRate, "Strike must be above current rate for upward hedge");
+            require(
+                _params.strike > _params.initialRate,
+                "Strike must be above current rate for upward hedge"
+            );
         } else {
-            require(_params.strike < _params.initialRate, "Strike must be below current rate for downward hedge");
+            require(
+                _params.strike < _params.initialRate,
+                "Strike must be below current rate for downward hedge"
+            );
         }
 
-        IERC20(s.usdcToken).safeTransferFrom(
-            msg.sender,
-            address(this),
-            s.hedgeFeeConfig.eventCreationFee + _params.initialLiquidity
-        );
-
+        // --- Effects ---
         s.hedgePlatformFeesCollected += s.hedgeFeeConfig.eventCreationFee;
 
         uint256 eventId = ++s.hedgeEventCounter;
@@ -232,11 +373,14 @@ contract BlockFinaXHedgeFacet {
 
         uint256 depositId = _createInitialDeposit(s, eventId, _params.initialLiquidity);
 
+        // --- Interactions ---
+        uint256 totalAmount = s.hedgeFeeConfig.eventCreationFee + _params.initialLiquidity;
+        IERC20(s.usdcToken).safeTransferFrom(msg.sender, address(this), totalAmount);
+
         emit HedgeEventCreated(
             eventId, msg.sender, _params.underlying, _params.strike,
             _params.premiumRate, _params.expiryDate, _params.initialLiquidity
         );
-
         emit LiquidityDeposited(
             eventId, depositId, msg.sender,
             _params.initialLiquidity,
@@ -321,20 +465,31 @@ contract BlockFinaXHedgeFacet {
      * @notice Deposit USDC liquidity into a hedge event pool
      * @param _eventId The event to deposit into
      * @param _amount USDC amount (6 decimals, min 10e6)
+     *
+     * Capped at MAX_DEPOSITS_PER_EVENT to bound gas cost of _distributePremiumToLps().
      */
-    function deposit(uint256 _eventId, uint256 _amount) external returns (uint256) {
+    function deposit(uint256 _eventId, uint256 _amount)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (uint256)
+    {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
 
+        // --- Checks ---
         require(evt.id > 0, "Event not found");
         require(evt.status == LibAppStorage.HedgeEventStatus.Open, "Event not open");
         require(_amount >= 10 * PRECISION, "Min deposit: 10 USDC");
+        require(
+            s.hedgeEventDepositIds[_eventId].length < MAX_DEPOSITS_PER_EVENT,
+            "Max LP deposits reached for this event"
+        );
 
         bool isCreator = msg.sender == evt.creator;
         require(isCreator || evt.allowExternalLp, "Pool is private");
 
-        IERC20(s.usdcToken).safeTransferFrom(msg.sender, address(this), _amount);
-
+        // --- Effects ---
         uint256 shares;
         if (evt.totalLiquidity == 0) {
             shares = _amount * SHARES_PRECISION / PRECISION;
@@ -358,6 +513,9 @@ contract BlockFinaXHedgeFacet {
         s.hedgeEventDepositIds[_eventId].push(depositId);
         s.lpDepositIds[msg.sender].push(depositId);
 
+        // --- Interactions ---
+        IERC20(s.usdcToken).safeTransferFrom(msg.sender, address(this), _amount);
+
         emit LiquidityDeposited(_eventId, depositId, msg.sender, _amount, shares);
 
         return depositId;
@@ -375,24 +533,28 @@ contract BlockFinaXHedgeFacet {
      * Payout is predetermined at purchase time:
      *   upward hedge:   payout = notional × (strike - initialRate) / initialRate
      *   downward hedge: payout = notional × (initialRate - strike) / initialRate
-     * This is a fixed amount known upfront — the hedger knows exactly
-     * what they'll receive if the strike is touched.
      *
-     * Total cost = premium + platform fee
-     * Premium = notional × premiumRate / 1e6 → goes 100% to LPs
-     * Platform fee = notional × hedgerFeeRate / 1e6 → stays in contract
-     *
-     * Pool must have enough liquidity to cover the predetermined payout.
+     * Capped at MAX_POSITIONS_PER_EVENT to bound gas cost of settleEvent().
      */
-    function buyProtection(uint256 _eventId, uint256 _notional) external returns (uint256) {
+    function buyProtection(uint256 _eventId, uint256 _notional)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (uint256)
+    {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
 
+        // --- Checks ---
         require(evt.id > 0, "Event not found");
         require(evt.status == LibAppStorage.HedgeEventStatus.Open, "Event not open");
         require(evt.poolOpen, "Pool not open for hedging");
         require(block.timestamp < evt.expiryDate, "Event expired");
         require(_notional >= 10 * PRECISION, "Min notional: 10 USDC");
+        require(
+            s.hedgeEventPositionIds[_eventId].length < MAX_POSITIONS_PER_EVENT,
+            "Max positions reached for this event"
+        );
 
         uint256 priceDelta = evt.strikeAbove
             ? evt.strike - evt.initialRate
@@ -406,8 +568,7 @@ contract BlockFinaXHedgeFacet {
         uint256 platformFee = (_notional * s.hedgeFeeConfig.hedgerFeeRate) / PRECISION;
         uint256 totalCost = premium + platformFee;
 
-        IERC20(s.usdcToken).safeTransferFrom(msg.sender, address(this), totalCost);
-
+        // --- Effects ---
         evt.totalExposure += _notional;
         evt.totalMaxPayout += predeterminedPayout;
         evt.totalPremiums += premium;
@@ -434,6 +595,9 @@ contract BlockFinaXHedgeFacet {
         evt.creatorEarnings += creatorReward;
         s.hedgePlatformFeesCollected += (platformFee - creatorReward);
 
+        // --- Interactions ---
+        IERC20(s.usdcToken).safeTransferFrom(msg.sender, address(this), totalCost);
+
         emit ProtectionPurchased(
             _eventId, positionId, msg.sender,
             _notional, premium, platformFee, totalCost
@@ -451,10 +615,7 @@ contract BlockFinaXHedgeFacet {
      * @param _eventId Event to settle
      * @param _settlementPrice Actual FX rate (6 decimals)
      *
-     * One-touch settlement: Oracle admin settles when price touches strike.
-     * Payouts are predetermined at purchase time.
-     * Upward hedge:   triggered when settlementPrice >= strike
-     * Downward hedge: triggered when settlementPrice <= strike
+     * Loop is bounded by MAX_POSITIONS_PER_EVENT enforced in buyProtection().
      */
     function settleEvent(uint256 _eventId, uint256 _settlementPrice) external onlyOracleAdmin {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
@@ -496,11 +657,8 @@ contract BlockFinaXHedgeFacet {
     /**
      * @notice Claim payout after a winning settlement
      * @param _positionId Position to claim
-     *
-     * Deducts 1% platform fee from gross payout.
-     * 5% of that fee goes to event creator.
      */
-    function claimPayout(uint256 _positionId) external {
+    function claimPayout(uint256 _positionId) external nonReentrant {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgePosition storage pos = s.hedgePositions[_positionId];
 
@@ -538,11 +696,8 @@ contract BlockFinaXHedgeFacet {
     /**
      * @notice Claim earned premiums (LP)
      * @param _depositId LP deposit to claim from
-     *
-     * Claimable = premiumsEarned - premiumsClaimed
-     * Deducts 1% platform fee. 5% of fee goes to creator.
      */
-    function claimPremiums(uint256 _depositId) external {
+    function claimPremiums(uint256 _depositId) external nonReentrant {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgeLpDeposit storage dep = s.hedgeLpDeposits[_depositId];
 
@@ -575,10 +730,10 @@ contract BlockFinaXHedgeFacet {
      * @notice Withdraw deposited capital (LP)
      * @param _depositId LP deposit to withdraw
      *
-     * Only allowed after event is settled or expired.
-     * Capital is locked while event is open (backing active hedges).
+     * Precision fix: LP payout share computed in a single multiplication before division
+     * to avoid compounding truncation errors from two sequential divisions.
      */
-    function withdrawCapital(uint256 _depositId) external {
+    function withdrawCapital(uint256 _depositId) external nonReentrant {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgeLpDeposit storage dep = s.hedgeLpDeposits[_depositId];
 
@@ -598,8 +753,8 @@ contract BlockFinaXHedgeFacet {
         uint256 withdrawAmount = dep.amount;
 
         if (evt.triggered && evt.totalMaxPayout > 0 && evt.totalLiquidity > 0) {
-            uint256 lpShare = (dep.amount * PRECISION) / evt.totalLiquidity;
-            uint256 lpPayoutShare = (evt.totalMaxPayout * lpShare) / PRECISION;
+            // Single-step calculation avoids double-division precision loss
+            uint256 lpPayoutShare = (evt.totalMaxPayout * dep.amount) / evt.totalLiquidity;
             if (lpPayoutShare > withdrawAmount) {
                 withdrawAmount = 0;
             } else {
@@ -621,7 +776,7 @@ contract BlockFinaXHedgeFacet {
     /**
      * @notice Creator withdraws their accumulated loyalty earnings
      */
-    function withdrawCreatorEarnings(uint256 _eventId) external {
+    function withdrawCreatorEarnings(uint256 _eventId) external nonReentrant {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
 
@@ -641,9 +796,6 @@ contract BlockFinaXHedgeFacet {
     //                    VIEW FUNCTIONS
     // ============================================================
 
-    /**
-     * @notice Get hedge event core details
-     */
     function getHedgeEventCore(uint256 _eventId) external view returns (
         uint256 id,
         address creator,
@@ -660,7 +812,6 @@ contract BlockFinaXHedgeFacet {
     ) {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
-
         return (
             evt.id, evt.creator, evt.name, evt.underlying,
             evt.strike, evt.premiumRate, evt.expiryDate, evt.status,
@@ -668,9 +819,6 @@ contract BlockFinaXHedgeFacet {
         );
     }
 
-    /**
-     * @notice Get hedge event settlement and pool stats
-     */
     function getHedgeEventStats(uint256 _eventId) external view returns (
         uint256 settlementPrice,
         bool triggered,
@@ -685,7 +833,6 @@ contract BlockFinaXHedgeFacet {
     ) {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
-
         return (
             evt.settlementPrice, evt.triggered, evt.settledAt,
             evt.creatorEarnings, evt.totalLiquidity, evt.totalExposure,
@@ -694,9 +841,6 @@ contract BlockFinaXHedgeFacet {
         );
     }
 
-    /**
-     * @notice Get hedge position details
-     */
     function getHedgePosition(uint256 _positionId) external view returns (
         uint256 id,
         uint256 eventId,
@@ -710,7 +854,6 @@ contract BlockFinaXHedgeFacet {
     ) {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgePosition storage pos = s.hedgePositions[_positionId];
-
         return (
             pos.id, pos.eventId, pos.hedger, pos.notional,
             pos.premiumPaid, pos.platformFeePaid, pos.payoutAmount,
@@ -718,9 +861,6 @@ contract BlockFinaXHedgeFacet {
         );
     }
 
-    /**
-     * @notice Get LP deposit details
-     */
     function getHedgeLpDeposit(uint256 _depositId) external view returns (
         uint256 id,
         uint256 eventId,
@@ -733,7 +873,6 @@ contract BlockFinaXHedgeFacet {
     ) {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgeLpDeposit storage dep = s.hedgeLpDeposits[_depositId];
-
         return (
             dep.id, dep.eventId, dep.lp, dep.amount,
             dep.shares, dep.premiumsEarned, dep.premiumsClaimed,
@@ -741,49 +880,26 @@ contract BlockFinaXHedgeFacet {
         );
     }
 
-    /**
-     * @notice Get all position IDs for an event
-     */
     function getEventPositionIds(uint256 _eventId) external view returns (uint256[] memory) {
-        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
-        return s.hedgeEventPositionIds[_eventId];
+        return LibAppStorage.appStorage().hedgeEventPositionIds[_eventId];
     }
 
-    /**
-     * @notice Get all deposit IDs for an event
-     */
     function getEventDepositIds(uint256 _eventId) external view returns (uint256[] memory) {
-        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
-        return s.hedgeEventDepositIds[_eventId];
+        return LibAppStorage.appStorage().hedgeEventDepositIds[_eventId];
     }
 
-    /**
-     * @notice Get all event IDs created by an address
-     */
     function getCreatorEventIds(address _creator) external view returns (uint256[] memory) {
-        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
-        return s.hedgeCreatorEventIds[_creator];
+        return LibAppStorage.appStorage().hedgeCreatorEventIds[_creator];
     }
 
-    /**
-     * @notice Get all position IDs for a hedger
-     */
     function getHedgerPositionIds(address _hedger) external view returns (uint256[] memory) {
-        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
-        return s.hedgerPositionIds[_hedger];
+        return LibAppStorage.appStorage().hedgerPositionIds[_hedger];
     }
 
-    /**
-     * @notice Get all deposit IDs for an LP
-     */
     function getLpDepositIds(address _lp) external view returns (uint256[] memory) {
-        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
-        return s.lpDepositIds[_lp];
+        return LibAppStorage.appStorage().lpDepositIds[_lp];
     }
 
-    /**
-     * @notice Get fee configuration
-     */
     function getHedgeFeeConfig() external view returns (
         uint256 eventCreationFee,
         uint256 hedgerFeeRate,
@@ -801,25 +917,14 @@ contract BlockFinaXHedgeFacet {
         );
     }
 
-    /**
-     * @notice Get total platform fees collected
-     */
     function getHedgePlatformFees() external view returns (uint256) {
-        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
-        return s.hedgePlatformFeesCollected;
+        return LibAppStorage.appStorage().hedgePlatformFeesCollected;
     }
 
-    /**
-     * @notice Get total number of hedge events
-     */
     function getTotalHedgeEvents() external view returns (uint256) {
-        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
-        return s.totalHedgeEvents;
+        return LibAppStorage.appStorage().totalHedgeEvents;
     }
 
-    /**
-     * @notice Get pool utilization for an event
-     */
     function getPoolUtilization(uint256 _eventId) external view returns (
         uint256 totalLiquidity,
         uint256 totalExposure,
@@ -845,7 +950,8 @@ contract BlockFinaXHedgeFacet {
     // ============================================================
 
     /**
-     * @dev Distribute premium proportionally to all active LPs
+     * @dev Distribute premium proportionally to all active LPs.
+     *      Loop bounded by MAX_DEPOSITS_PER_EVENT (enforced in deposit()).
      */
     function _distributePremiumToLps(
         LibAppStorage.AppStorage storage s,
@@ -867,7 +973,8 @@ contract BlockFinaXHedgeFacet {
     }
 
     /**
-     * @dev Get total active shares for an event
+     * @dev Get total active shares for an event.
+     *      Loop bounded by MAX_DEPOSITS_PER_EVENT (enforced in deposit()).
      */
     function _getTotalShares(
         LibAppStorage.AppStorage storage s,
@@ -885,5 +992,4 @@ contract BlockFinaXHedgeFacet {
 
         return total;
     }
-
 }

@@ -19,14 +19,15 @@ import {LibDiamond} from "../libraries/LibDiamond.sol";
  *
  * SETTLEMENT FLOW
  * ---------------
- * 1. Admin registers N oracle wallets via addOracle().
+ * 1. Admin registers N oracle wallets via addOracle() (max MAX_ORACLES = 10).
  * 2. Admin sets requiredSigners (default 2) and toleranceBps (default 100 = 1%).
  * 3. Each oracle node independently calls submitRate(eventId, price).
- * 4. When requiredSigners submissions exist and all prices agree within
+ * 4. When requiredSigners valid submissions exist and all prices agree within
  *    toleranceBps, the facet settles the event automatically at the average price.
  * 5. If submissions disagree (spread > toleranceBps) they are cleared and
  *    nodes must resubmit after their next poll cycle.
  * 6. Stale submissions (older than 15 min) are ignored at consensus check.
+ * 7. Admin can call clearStaleSubmissions() to manually unstick a stuck event.
  *
  * COMPATIBILITY
  * -------------
@@ -37,6 +38,9 @@ import {LibDiamond} from "../libraries/LibDiamond.sol";
  */
 contract BlockFinaXOracleFacet {
     uint256 constant STALE_THRESHOLD = 15 * 60;
+
+    /// @dev Maximum number of registered oracle wallets (bounds _checkConsensus loop)
+    uint256 constant MAX_ORACLES = 10;
 
     // ============================================================
     //                          EVENTS
@@ -93,11 +97,13 @@ contract BlockFinaXOracleFacet {
     /**
      * @notice Register a new oracle wallet.
      * @param _oracle Wallet address that will call submitRate().
+     * @dev Capped at MAX_ORACLES (10) to prevent unbounded loop in _checkConsensus().
      */
     function addOracle(address _oracle) external onlyOwner {
         LibOracleStorage.OracleStorage storage os = LibOracleStorage.oracleStorage();
         require(_oracle != address(0), "Zero address");
         require(!os.isOracle[_oracle], "Already registered");
+        require(os.oracles.length < MAX_ORACLES, "Max oracle count reached (10)");
 
         os.oracles.push(_oracle);
         os.isOracle[_oracle] = true;
@@ -148,6 +154,30 @@ contract BlockFinaXOracleFacet {
         require(_bps <= 1000, "Max 10% tolerance");
         os.toleranceBps = _bps;
         emit OracleConfigUpdated(os.requiredSigners, os.toleranceBps);
+    }
+
+    /**
+     * @notice Manually clear all pending submissions for an event.
+     * @dev Use to recover from a stuck state where stale submissions prevent
+     *      consensus from ever being reached (e.g. an oracle goes offline).
+     *      After clearing, active oracles must resubmit.
+     * @param _eventId The event whose submissions should be cleared.
+     */
+    function clearStaleSubmissions(uint256 _eventId) external onlyOwner {
+        LibOracleStorage.OracleStorage storage os = LibOracleStorage.oracleStorage();
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+
+        require(s.hedgeEvents[_eventId].id > 0, "Event not found");
+        require(
+            s.hedgeEvents[_eventId].status == LibAppStorage.HedgeEventStatus.Open,
+            "Event already settled"
+        );
+
+        address[] storage submitters = os.submitters[_eventId];
+        require(submitters.length > 0, "No submissions to clear");
+
+        _clearSubmissions(_eventId, submitters, os);
+        emit SubmissionsCleared(_eventId, "Manually cleared by admin");
     }
 
     // ============================================================
@@ -310,11 +340,12 @@ contract BlockFinaXOracleFacet {
         returns (
             uint256 requiredSigners,
             uint256 toleranceBps,
-            uint256 oracleCount
+            uint256 oracleCount,
+            uint256 maxOracles
         )
     {
         LibOracleStorage.OracleStorage storage os = LibOracleStorage.oracleStorage();
-        return (os.requiredSigners, os.toleranceBps, os.oracles.length);
+        return (os.requiredSigners, os.toleranceBps, os.oracles.length, MAX_ORACLES);
     }
 
     function isAuthorisedOracle(address _oracle)
@@ -331,12 +362,15 @@ contract BlockFinaXOracleFacet {
         returns (
             uint256 price,
             uint256 timestamp,
-            bool exists
+            bool exists,
+            bool isStale
         )
     {
         LibOracleStorage.Submission storage sub =
             LibOracleStorage.oracleStorage().submissions[_eventId][_oracle];
-        return (sub.price, sub.timestamp, sub.exists);
+        bool stale = sub.exists &&
+            (block.timestamp - sub.timestamp) > STALE_THRESHOLD;
+        return (sub.price, sub.timestamp, sub.exists, stale);
     }
 
     function getSubmitterCount(uint256 _eventId)
@@ -353,7 +387,8 @@ contract BlockFinaXOracleFacet {
         returns (
             address[] memory oracleAddresses,
             uint256[] memory prices,
-            uint256[] memory timestamps
+            uint256[] memory timestamps,
+            bool[] memory isStale
         )
     {
         LibOracleStorage.OracleStorage storage os = LibOracleStorage.oracleStorage();
@@ -363,6 +398,7 @@ contract BlockFinaXOracleFacet {
         oracleAddresses = new address[](count);
         prices = new uint256[](count);
         timestamps = new uint256[](count);
+        isStale = new bool[](count);
 
         for (uint256 i = 0; i < count; i++) {
             LibOracleStorage.Submission storage sub =
@@ -370,6 +406,7 @@ contract BlockFinaXOracleFacet {
             oracleAddresses[i] = submitters[i];
             prices[i] = sub.price;
             timestamps[i] = sub.timestamp;
+            isStale[i] = (block.timestamp - sub.timestamp) > STALE_THRESHOLD;
         }
     }
 }

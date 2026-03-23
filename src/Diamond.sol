@@ -5,7 +5,7 @@ import {LibDiamond} from "./libraries/LibDiamond.sol";
 import {IDiamondCut} from "./interfaces/IDiamondCut.sol";
 import {LibAppStorage} from "./libraries/LibAppStorage.sol";
 
-contract Diamond {    
+contract Diamond {
     constructor(address _contractOwner, address _diamondCutFacet, address _usdcToken) payable {
         LibDiamond.setContractOwner(_contractOwner);
 
@@ -49,5 +49,13 @@ contract Diamond {
         }
     }
 
-    receive() external payable {}
+    /**
+     * @dev Reverts any direct ETH transfer to the Diamond.
+     *      This contract handles USDC only. Any ETH sent here is a mistake.
+     *      If ETH is accidentally present (e.g. from before this fix),
+     *      use HedgeFacet.rescueETH() to recover it.
+     */
+    receive() external payable {
+        revert("Diamond: ETH not accepted. Use USDC.");
+    }
 }
