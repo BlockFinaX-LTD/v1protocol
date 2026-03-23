@@ -37,15 +37,16 @@ module.exports = {
   },
   etherscan: {
     apiKey: {
-      baseSepolia: process.env.BASESCAN_API_KEY || "",
-      liskSepolia: "placeholder"
+      baseSepolia:   process.env.BASESCAN_API_KEY || "",
+      liskSepolia:   "placeholder",
+      lisk:          "placeholder"
     },
     customChains: [
       {
         network: "baseSepolia",
         chainId: 84532,
         urls: {
-          apiURL: "https://api-sepolia.basescan.org/api",
+          apiURL:     "https://api-sepolia.basescan.org/api",
           browserURL: "https://sepolia.basescan.org"
         }
       },
@@ -53,8 +54,16 @@ module.exports = {
         network: "liskSepolia",
         chainId: 4202,
         urls: {
-          apiURL: "https://sepolia-blockscout.lisk.com/api",
+          apiURL:     "https://sepolia-blockscout.lisk.com/api",
           browserURL: "https://sepolia-blockscout.lisk.com"
+        }
+      },
+      {
+        network: "lisk",
+        chainId: 1135,
+        urls: {
+          apiURL:     "https://blockscout.lisk.com/api",
+          browserURL: "https://blockscout.lisk.com"
         }
       }
     ]
@@ -64,8 +73,8 @@ module.exports = {
   },
   paths: {
     sources: "./src",
-    tests: "./test",
-    cache: "./cache",
+    tests:   "./test",
+    cache:   "./cache",
     artifacts: "./artifacts"
   }
 };
