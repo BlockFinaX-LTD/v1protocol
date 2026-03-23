@@ -541,6 +541,84 @@
       "artifacts": [
         "IDiamondLoupe"
       ]
+    },
+    "/home/runner/workspace/contracts/src/facets/BlockFinaXOracleFacet.sol": {
+      "lastModificationDate": 1774232218717,
+      "contentHash": "7c3338e41dd69c688a9a829353d2474a",
+      "sourceName": "src/facets/BlockFinaXOracleFacet.sol",
+      "solcConfig": {
+        "version": "0.8.20",
+        "settings": {
+          "optimizer": {
+            "enabled": true,
+            "runs": 200
+          },
+          "viaIR": true,
+          "evmVersion": "paris",
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [
+        "../libraries/LibAppStorage.sol",
+        "../libraries/LibOracleStorage.sol",
+        "../libraries/LibDiamond.sol"
+      ],
+      "versionPragmas": [
+        "^0.8.20"
+      ],
+      "artifacts": [
+        "BlockFinaXOracleFacet"
+      ]
+    },
+    "/home/runner/workspace/contracts/src/libraries/LibOracleStorage.sol": {
+      "lastModificationDate": 1774232172932,
+      "contentHash": "79699a854d63ab595b7d0bbbf6e493ff",
+      "sourceName": "src/libraries/LibOracleStorage.sol",
+      "solcConfig": {
+        "version": "0.8.20",
+        "settings": {
+          "optimizer": {
+            "enabled": true,
+            "runs": 200
+          },
+          "viaIR": true,
+          "evmVersion": "paris",
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [],
+      "versionPragmas": [
+        "^0.8.20"
+      ],
+      "artifacts": [
+        "LibOracleStorage"
+      ]
     }
   }
 }
