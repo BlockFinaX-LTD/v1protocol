@@ -1,16 +1,82 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+/**
+ * @title LibAppStorage
+ * @author BlockFinaX Protocol
+ * @notice Diamond-pattern shared storage library for the BlockFinaX protocol.
+ *
+ * @dev All protocol state lives in a single `AppStorage` struct stored at a
+ *      deterministic keccak256 slot (APP_STORAGE_POSITION). This follows the
+ *      Diamond Storage pattern described in EIP-2535, ensuring that all facets
+ *      delegatecalled by the Diamond proxy read and write from the same storage
+ *      location without slot collision.
+ *
+ *      Facets access storage exclusively via `LibAppStorage.appStorage()`.
+ *      No facet may declare contract-level state variables.
+ *
+ *      Monetary values: all USDC amounts use 6 decimals (USDC standard).
+ *      Rate/percentage values: use PRECISION = 1e6 as denominator (100% = 1e6).
+ */
 library LibAppStorage {
+    /// @dev Unique storage slot for AppStorage. Chosen to avoid collision with
+    ///      LibDiamond (diamond.standard.diamond.storage) and LibOracleStorage.
     bytes32 constant APP_STORAGE_POSITION = keccak256("blockfinax.app.storage");
 
     // ============================================================
-    //                    HEDGE STORAGE STRUCTS
+    //                    ENUMS
     // ============================================================
 
+    /**
+     * @notice Lifecycle status of a hedge event.
+     * @param Open     Event is active: deposits, purchases, and settlement are possible.
+     * @param Settled  Oracle has posted the final rate; positions are resolved.
+     * @param Expired  Reserved for future use (events currently transition Open → Settled).
+     */
     enum HedgeEventStatus { Open, Settled, Expired }
+
+    /**
+     * @notice Lifecycle status of a hedger position.
+     * @param Active      Purchased and awaiting settlement.
+     * @param SettledWin  Legacy status (use Claimable for new settlements).
+     * @param SettledLoss Legacy status (use Expired for new settlements).
+     * @param Claimed     Payout has been successfully claimed by the hedger.
+     * @param Claimable   Strike was touched; hedger may call claimPayout().
+     * @param Expired     Strike was not touched; payoutAmount = 0, position is closed.
+     */
     enum HedgePositionStatus { Active, SettledWin, SettledLoss, Claimed, Claimable, Expired }
 
+    // ============================================================
+    //                    STRUCTS
+    // ============================================================
+
+    /**
+     * @notice Represents a single hedge event (FX protection pool).
+     *
+     * @param id              Unique event identifier (auto-incremented from hedgeEventCounter).
+     * @param creator         Address that created the event and made the initial deposit.
+     * @param name            Human-readable label for the event.
+     * @param underlying      Currency pair identifier, e.g. "USD/GHS".
+     * @param strike          Trigger price in 6-decimal units. Hedge pays out if price touches this.
+     * @param premiumRate     Premium charged to hedgers as a fraction of notional (PRECISION denominator).
+     * @param expiryDate      Unix timestamp after which no new positions can be opened.
+     * @param status          Current lifecycle stage of the event.
+     * @param settlementPrice Final FX rate posted by the oracle at settlement (6 decimals). 0 before settlement.
+     * @param triggered       True if settlementPrice touched the strike, meaning hedgers win.
+     * @param settledAt       Unix timestamp of settlement. 0 before settlement.
+     * @param poolOpen        Whether new hedger positions are currently accepted.
+     * @param allowExternalLp Whether LP wallets other than the creator can deposit.
+     * @param creatorEarnings Accumulated creator loyalty earnings not yet withdrawn (USDC, 6 decimals).
+     * @param totalLiquidity  Total USDC deposited by all LPs (6 decimals).
+     * @param totalExposure   Sum of all hedger notionals (6 decimals). Informational only.
+     * @param totalPremiums   Sum of all premiums collected from hedgers (6 decimals). Informational only.
+     * @param lpCount         Historical count of LP deposit calls (not unique LP addresses).
+     * @param hedgerCount     Total number of hedger positions created on this event.
+     * @param createdAt       Unix timestamp of event creation.
+     * @param initialRate     Market rate at creation time (6 decimals). Used to compute predetermined payouts.
+     * @param totalMaxPayout  Sum of all predetermined payouts reserved from pool liquidity (6 decimals).
+     * @param strikeAbove     true = upward hedge (pays out if price >= strike); false = downward hedge.
+     */
     struct HedgeEvent {
         uint256 id;
         address creator;
@@ -37,6 +103,21 @@ library LibAppStorage {
         bool strikeAbove;
     }
 
+    /**
+     * @notice Represents a single hedger position on a hedge event.
+     *
+     * @param id              Unique position identifier (auto-incremented from hedgePositionCounter).
+     * @param eventId         The hedge event this position belongs to.
+     * @param hedger          Wallet address that purchased this position.
+     * @param notional        Coverage amount in USDC (6 decimals).
+     * @param premiumPaid     Premium paid by the hedger at buyProtection() (USDC, 6 decimals).
+     * @param platformFeePaid Platform fee paid by the hedger at buyProtection() (USDC, 6 decimals).
+     * @param payoutAmount    Predetermined payout if the event triggers (USDC, 6 decimals).
+     *                        Set to 0 at settlement if the event did not trigger.
+     * @param status          Current lifecycle status of this position.
+     * @param claimed         Whether claimPayout() has been successfully called.
+     * @param createdAt       Unix timestamp of position creation.
+     */
     struct HedgePosition {
         uint256 id;
         uint256 eventId;
@@ -50,6 +131,21 @@ library LibAppStorage {
         uint256 createdAt;
     }
 
+    /**
+     * @notice Represents a single LP deposit into a hedge event pool.
+     *
+     * @param id              Unique deposit identifier (auto-incremented from hedgeLpDepositCounter).
+     * @param eventId         The hedge event this deposit belongs to.
+     * @param lp              Wallet address that made this deposit.
+     * @param amount          USDC deposited (6 decimals).
+     * @param shares          Share tokens received, representing proportional pool ownership.
+     *                        Used to calculate the LP's fraction of premium distributions.
+     * @param premiumsEarned  Cumulative premiums allocated to this deposit across all buyProtection() calls (USDC, 6 decimals).
+     * @param premiumsClaimed Cumulative premiums already withdrawn via claimPremiums() (USDC, 6 decimals).
+     * @param withdrawn       Whether withdrawCapital() has been successfully called.
+     * @param withdrawnAt     Unix timestamp of capital withdrawal. 0 before withdrawal.
+     * @param createdAt       Unix timestamp of deposit creation.
+     */
     struct HedgeLpDeposit {
         uint256 id;
         uint256 eventId;
@@ -63,6 +159,19 @@ library LibAppStorage {
         uint256 createdAt;
     }
 
+    /**
+     * @notice Protocol fee configuration. All rates use PRECISION = 1e6 as denominator.
+     *
+     * @param eventCreationFee   Flat USDC amount charged to the creator at createEvent() (6 decimals).
+     * @param hedgerFeeRate      Platform fee on notional charged to hedger at buyProtection().
+     *                           E.g. 5000 = 0.5% (5000 / 1e6).
+     * @param hedgerPayoutFeeRate Platform fee deducted from gross payout at claimPayout().
+     *                           E.g. 10000 = 1%.
+     * @param lpProfitFeeRate    Platform fee deducted from premium claim at claimPremiums().
+     *                           E.g. 10000 = 1%.
+     * @param creatorLoyaltyRate Share of every platform fee credited to the event creator.
+     *                           E.g. 50000 = 5%.
+     */
     struct HedgeFeeConfig {
         uint256 eventCreationFee;
         uint256 hedgerFeeRate;
@@ -71,48 +180,89 @@ library LibAppStorage {
         uint256 creatorLoyaltyRate;
     }
 
+    /**
+     * @notice Root storage struct for the BlockFinaX protocol.
+     * @dev Accessed via appStorage(). All fields are zero-initialised at deployment.
+     *      New fields should always be appended at the end to preserve storage layout
+     *      compatibility with existing deployed Diamond facets.
+     */
     struct AppStorage {
+        /// @dev Address of the USDC ERC-20 token contract used for all payments.
         address usdcToken;
 
         // ============================================================
         //                    HEDGE STORAGE
         // ============================================================
+
+        /// @dev All hedge events, keyed by event ID.
         mapping(uint256 => HedgeEvent) hedgeEvents;
+
+        /// @dev Auto-incrementing counter used to assign event IDs. Current value = last assigned ID.
         uint256 hedgeEventCounter;
+
+        /// @dev Total number of hedge events ever created (same as hedgeEventCounter).
         uint256 totalHedgeEvents;
 
+        /// @dev All hedger positions, keyed by position ID.
         mapping(uint256 => HedgePosition) hedgePositions;
+
+        /// @dev Auto-incrementing counter used to assign position IDs.
         uint256 hedgePositionCounter;
 
+        /// @dev All LP deposits, keyed by deposit ID.
         mapping(uint256 => HedgeLpDeposit) hedgeLpDeposits;
+
+        /// @dev Auto-incrementing counter used to assign deposit IDs.
         uint256 hedgeLpDepositCounter;
 
+        /// @dev Ordered list of position IDs for each event. Bounded by MAX_POSITIONS_PER_EVENT.
         mapping(uint256 => uint256[]) hedgeEventPositionIds;
+
+        /// @dev Ordered list of deposit IDs for each event. Bounded by MAX_DEPOSITS_PER_EVENT.
         mapping(uint256 => uint256[]) hedgeEventDepositIds;
+
+        /// @dev Event IDs created by each creator address.
         mapping(address => uint256[]) hedgeCreatorEventIds;
+
+        /// @dev Position IDs owned by each hedger address (across all events).
         mapping(address => uint256[]) hedgerPositionIds;
+
+        /// @dev Deposit IDs owned by each LP address (across all events).
         mapping(address => uint256[]) lpDepositIds;
 
+        /// @dev Protocol fee parameters. Must be initialised via initializeHedgeFees() before use.
         HedgeFeeConfig hedgeFeeConfig;
 
+        /// @dev Cumulative platform fees collected and not yet withdrawn by the owner (USDC, 6 decimals).
         uint256 hedgePlatformFeesCollected;
 
+        /// @dev Single-key oracle admin address authorised to call settleEvent() directly.
+        ///      The Diamond owner always retains settlement rights regardless of this setting.
         address hedgeOracleAdmin;
 
         // ============================================================
         //                    SECURITY FLAGS
         // ============================================================
 
-        /// @dev Reentrancy lock — set true while a state-changing function executes
+        /// @dev Reentrancy mutex. True while a nonReentrant function is executing.
+        ///      Stored in AppStorage (not contract state) because facets are delegatecalled.
         bool hedgeReentrancyLock;
 
-        /// @dev Emergency pause — all hedger/LP state-changing functions blocked when true
+        /// @dev Emergency pause flag. True blocks all user-facing state-changing functions.
+        ///      Settlement via settleEvent() remains available while paused.
         bool paused;
 
-        /// @dev Set to true when initializeHedgeFees() is called; required before createEvent()
+        /// @dev Confirms that initializeHedgeFees() has been called at least once.
+        ///      createEvent() reverts until this is true.
         bool feesInitialized;
     }
 
+    /**
+     * @notice Returns a storage pointer to the protocol's AppStorage struct.
+     * @dev Uses inline assembly to point to the deterministic APP_STORAGE_POSITION slot.
+     *      This is the standard Diamond Storage access pattern from EIP-2535.
+     * @return s Storage pointer to AppStorage.
+     */
     function appStorage() internal pure returns (AppStorage storage s) {
         bytes32 position = APP_STORAGE_POSITION;
         assembly {

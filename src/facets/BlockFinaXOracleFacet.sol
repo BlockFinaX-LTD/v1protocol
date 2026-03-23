@@ -7,66 +7,88 @@ import {LibDiamond} from "../libraries/LibDiamond.sol";
 
 /**
  * @title BlockFinaXOracleFacet
+ * @author BlockFinaX Protocol
  * @notice Multi-signer oracle facet for the BlockFinaX Diamond.
+ *         Provides decentralised, consensus-gated settlement for hedge events.
  *
- * ISOLATION GUARANTEE
- * -------------------
- * This facet is an additive upgrade. It does not modify any existing facet
- * or library. It uses LibOracleStorage (its own Diamond storage slot) and
- * reads/writes LibAppStorage only to settle events — using the same fields
- * that HedgeFacet.settleEvent() writes, so settlement results are fully
- * compatible with claimPayout / claimPremiums / withdrawCapital.
+ * @dev Isolation guarantee:
+ *      This facet is a pure additive upgrade. It does not modify any existing facet
+ *      or library file. It uses LibOracleStorage (its own Diamond storage slot, keyed
+ *      by a unique keccak256 position) and only touches LibAppStorage to write
+ *      settlement results — using the exact same fields that HedgeFacet.settleEvent()
+ *      writes, ensuring full compatibility with claimPayout, claimPremiums, and
+ *      withdrawCapital.
  *
- * SETTLEMENT FLOW
- * ---------------
- * 1. Admin registers N oracle wallets via addOracle() (max MAX_ORACLES = 10).
- * 2. Admin sets requiredSigners (default 2) and toleranceBps (default 100 = 1%).
- * 3. Each oracle node independently calls submitRate(eventId, price).
- * 4. When requiredSigners valid submissions exist and all prices agree within
- *    toleranceBps, the facet settles the event automatically at the average price.
- * 5. If submissions disagree (spread > toleranceBps) they are cleared and
- *    nodes must resubmit after their next poll cycle.
- * 6. Stale submissions (older than 15 min) are ignored at consensus check.
- * 7. Admin can call clearStaleSubmissions() to manually unstick a stuck event.
+ *      Settlement flow:
+ *        1. Owner registers up to MAX_ORACLES (10) oracle wallets via addOracle().
+ *        2. Owner sets requiredSigners (default 2) and toleranceBps (default 100 = 1%).
+ *        3. Each oracle node independently calls submitRate(eventId, price) when it
+ *           detects the strike has been touched or the event is approaching expiry.
+ *        4. On each submitRate() call, _checkConsensus() runs automatically:
+ *           a. Collects all non-stale submissions (age <= STALE_THRESHOLD = 15 min).
+ *           b. If fewer than requiredSigners valid submissions exist, exits silently.
+ *           c. Computes spread = (max - min) / min * 10000 (basis points).
+ *           d. If spread > toleranceBps: clears all submissions, emits SubmissionsCleared.
+ *              Oracles must resubmit after their next poll cycle.
+ *           e. If spread <= toleranceBps: computes average price, settles the event,
+ *              emits ConsensusReached and OracleEventSettled.
+ *        5. If oracles disagree persistently or one goes offline, the owner can call
+ *           clearStaleSubmissions() to manually clear the stuck state and let the
+ *           remaining active oracles resubmit.
  *
- * COMPATIBILITY
- * -------------
- * The existing HedgeFacet.settleEvent() continues to work unchanged via
- * the hedgeOracleAdmin single-key path. Both paths can coexist — once you
- * add oracle wallets to this facet you can migrate settlement exclusively
- * to this path by removing DEPLOYER_PRIVATE_KEY from the single-key oracle.
+ *      Coexistence with HedgeFacet.settleEvent():
+ *        Both settlement paths write to the same AppStorage fields and can coexist.
+ *        The existing single-key path (hedgeOracleAdmin) continues to function unchanged.
+ *        Once all oracle wallets are registered and tested, migrate settlement exclusively
+ *        to this facet by setting hedgeOracleAdmin = address(0) via setOracleAdmin().
+ *
+ *      Gas safety:
+ *        The oracle registry is capped at MAX_ORACLES = 10, bounding the _checkConsensus()
+ *        and removeOracle() loops. The _settleEvent() loop is bounded by
+ *        HedgeFacet.MAX_POSITIONS_PER_EVENT = 500.
  */
 contract BlockFinaXOracleFacet {
+    /// @dev Submissions older than this threshold (seconds) are excluded from consensus.
     uint256 constant STALE_THRESHOLD = 15 * 60;
 
-    /// @dev Maximum number of registered oracle wallets (bounds _checkConsensus loop)
+    /// @dev Maximum number of oracle wallets that can be registered.
+    ///      Bounds the loop in _checkConsensus() and removeOracle().
     uint256 constant MAX_ORACLES = 10;
 
     // ============================================================
     //                          EVENTS
     // ============================================================
 
+    /// @notice Emitted when a new oracle wallet is registered.
     event OracleAdded(address indexed oracle);
+
+    /// @notice Emitted when an oracle wallet is deregistered.
     event OracleRemoved(address indexed oracle);
+
+    /// @notice Emitted when requiredSigners or toleranceBps is updated.
     event OracleConfigUpdated(uint256 requiredSigners, uint256 toleranceBps);
 
+    /// @notice Emitted when an oracle submits a price reading for an event.
     event RateSubmitted(
         uint256 indexed eventId,
         address indexed oracle,
         uint256 price
     );
 
+    /// @notice Emitted when sufficient agreeing submissions trigger automatic settlement.
     event ConsensusReached(
         uint256 indexed eventId,
         uint256 agreedPrice,
         uint256 signerCount
     );
 
+    /// @notice Emitted when submissions are cleared due to disagreement or manual admin action.
     event SubmissionsCleared(
         uint256 indexed eventId,
         string reason
     );
 
+    /// @notice Emitted when an event is successfully settled via oracle consensus.
     event OracleEventSettled(
         uint256 indexed eventId,
         uint256 settlementPrice,
@@ -77,11 +99,13 @@ contract BlockFinaXOracleFacet {
     //                        MODIFIERS
     // ============================================================
 
+    /// @dev Restricts access to the Diamond contract owner.
     modifier onlyOwner() {
         require(msg.sender == LibDiamond.contractOwner(), "Not owner");
         _;
     }
 
+    /// @dev Restricts access to wallets registered via addOracle().
     modifier onlyAuthorisedOracle() {
         require(
             LibOracleStorage.oracleStorage().isOracle[msg.sender],
@@ -95,9 +119,13 @@ contract BlockFinaXOracleFacet {
     // ============================================================
 
     /**
-     * @notice Register a new oracle wallet.
-     * @param _oracle Wallet address that will call submitRate().
-     * @dev Capped at MAX_ORACLES (10) to prevent unbounded loop in _checkConsensus().
+     * @notice Register a new oracle wallet authorised to submit price readings.
+     * @dev Capped at MAX_ORACLES (10) to prevent gas DoS in _checkConsensus().
+     *      Sets default config (requiredSigners = 2, toleranceBps = 100) on first registration
+     *      if not already configured.
+     *      After adding oracles, call setRequiredSigners() to update the threshold.
+     *
+     * @param _oracle Wallet address that will call submitRate(). Cannot be address(0).
      */
     function addOracle(address _oracle) external onlyOwner {
         LibOracleStorage.OracleStorage storage os = LibOracleStorage.oracleStorage();
@@ -115,8 +143,13 @@ contract BlockFinaXOracleFacet {
     }
 
     /**
-     * @notice Remove an oracle wallet.
-     * @param _oracle Wallet to deregister.
+     * @notice Deregister an oracle wallet, removing its submission privileges.
+     * @dev Uses swap-and-pop to remove from the oracles array in O(n) time.
+     *      Pending submissions from the removed oracle are not automatically cleared —
+     *      call clearStaleSubmissions() if needed to force a clean slate.
+     *      Ensure requiredSigners <= remaining oracle count after removal.
+     *
+     * @param _oracle The wallet address to deregister. Must currently be registered.
      */
     function removeOracle(address _oracle) external onlyOwner {
         LibOracleStorage.OracleStorage storage os = LibOracleStorage.oracleStorage();
@@ -134,8 +167,12 @@ contract BlockFinaXOracleFacet {
     }
 
     /**
-     * @notice Set how many oracle submissions are needed for consensus.
-     * @param _required Must be >= 1 and <= registered oracle count.
+     * @notice Set the minimum number of agreeing oracle submissions required for consensus.
+     * @dev Must be >= 1 and <= the current number of registered oracles.
+     *      A value of 2 out of 3 oracles is recommended for mainnet (2-of-3 multisig equivalent).
+     *      Changes take effect for all subsequent submitRate() calls.
+     *
+     * @param _required New required signer count.
      */
     function setRequiredSigners(uint256 _required) external onlyOwner {
         LibOracleStorage.OracleStorage storage os = LibOracleStorage.oracleStorage();
@@ -146,8 +183,13 @@ contract BlockFinaXOracleFacet {
     }
 
     /**
-     * @notice Set the maximum allowed price spread between submissions.
-     * @param _bps Spread in basis points (e.g. 100 = 1%). Max 1000 (10%).
+     * @notice Set the maximum allowed price spread between oracle submissions for consensus.
+     * @dev Spread is computed as (maxPrice - minPrice) * 10000 / minPrice (basis points).
+     *      If the spread across valid submissions exceeds this threshold, all submissions
+     *      are cleared and oracles must resubmit. Capped at 1000 bps (10%).
+     *      100 bps (1%) is the recommended mainnet setting.
+     *
+     * @param _bps Tolerance in basis points (e.g. 100 = 1%). Maximum 1000 (10%).
      */
     function setToleranceBps(uint256 _bps) external onlyOwner {
         LibOracleStorage.OracleStorage storage os = LibOracleStorage.oracleStorage();
@@ -157,11 +199,14 @@ contract BlockFinaXOracleFacet {
     }
 
     /**
-     * @notice Manually clear all pending submissions for an event.
-     * @dev Use to recover from a stuck state where stale submissions prevent
-     *      consensus from ever being reached (e.g. an oracle goes offline).
-     *      After clearing, active oracles must resubmit.
-     * @param _eventId The event whose submissions should be cleared.
+     * @notice Manually clear all pending oracle submissions for an event.
+     * @dev Use this to recover from a stuck state where stale submissions prevent
+     *      consensus from ever being reached — for example, when an oracle node goes
+     *      offline after submitting but before enough other oracles have submitted.
+     *      After clearing, active oracle nodes must resubmit.
+     *      Only valid for events that are still Open.
+     *
+     * @param _eventId The hedge event ID whose submissions should be cleared.
      */
     function clearStaleSubmissions(uint256 _eventId) external onlyOwner {
         LibOracleStorage.OracleStorage storage os = LibOracleStorage.oracleStorage();
@@ -185,11 +230,19 @@ contract BlockFinaXOracleFacet {
     // ============================================================
 
     /**
-     * @notice Submit a price reading for a hedge event.
-     *         Settlement executes automatically when consensus is reached.
+     * @notice Submit a current market price reading for a hedge event.
+     *         Consensus and automatic settlement execute within the same transaction
+     *         if the required number of agreeing submissions have been collected.
      *
-     * @param _eventId  The hedge event to submit a rate for.
-     * @param _price    Current market price in 6-decimal USDC units (same as HedgeFacet).
+     * @dev Only registered oracle wallets may call this function.
+     *      An oracle can update its own submission by calling again (overwrite).
+     *      Stale submissions (older than STALE_THRESHOLD = 15 min) are excluded from
+     *      consensus counting even if they remain in storage.
+     *      After submitting, _checkConsensus() is called automatically.
+     *
+     * @param _eventId The ID of the hedge event to submit a price for.
+     * @param _price   Current market price in 6-decimal units (same scale as strike price).
+     *                 Must be > 0.
      */
     function submitRate(uint256 _eventId, uint256 _price)
         external
@@ -225,6 +278,25 @@ contract BlockFinaXOracleFacet {
     //                    INTERNAL CONSENSUS
     // ============================================================
 
+    /**
+     * @dev Evaluate whether current submissions meet the consensus threshold.
+     *      Called automatically after every submitRate().
+     *
+     *      Algorithm:
+     *        1. Count non-stale submissions. Exit if < requiredSigners.
+     *        2. Find min, max, and sum of valid prices.
+     *        3. Compute spread = (max - min) * 10000 / min (basis points).
+     *        4. If spread > toleranceBps: clear submissions, return.
+     *        5. Compute agreedPrice = sum / validCount (integer average).
+     *        6. Clear submissions, then call _settleEvent().
+     *
+     *      Clearing submissions before _settleEvent() prevents any reuse of
+     *      submissions across multiple settlement attempts.
+     *
+     * @param _eventId The event being evaluated.
+     * @param os       Reference to OracleStorage.
+     * @param s        Reference to AppStorage.
+     */
     function _checkConsensus(
         uint256 _eventId,
         LibOracleStorage.OracleStorage storage os,
@@ -275,11 +347,19 @@ contract BlockFinaXOracleFacet {
 
         emit ConsensusReached(_eventId, agreedPrice, validCount);
 
+        // Clear before settling to prevent any re-entrancy on storage state.
         _clearSubmissions(_eventId, submitters, os);
 
         _settleEvent(_eventId, agreedPrice, s);
     }
 
+    /**
+     * @dev Delete all submission records for an event and reset the submitters array.
+     *
+     * @param _eventId   The event whose submissions are being cleared.
+     * @param submitters Storage reference to the submitters array.
+     * @param os         Reference to OracleStorage.
+     */
     function _clearSubmissions(
         uint256 _eventId,
         address[] storage submitters,
@@ -291,6 +371,20 @@ contract BlockFinaXOracleFacet {
         delete os.submitters[_eventId];
     }
 
+    /**
+     * @dev Write settlement results to AppStorage, mirroring the logic of
+     *      HedgeFacet.settleEvent() exactly so that downstream claim and withdraw
+     *      functions behave identically regardless of which path settled the event.
+     *
+     *      Guards against double-settlement with an early return if the event is
+     *      no longer Open (e.g. settled by the single-key oracle in a race condition).
+     *
+     *      The position loop is bounded by HedgeFacet.MAX_POSITIONS_PER_EVENT = 500.
+     *
+     * @param _eventId         The event to settle.
+     * @param _settlementPrice The consensus-agreed price (6 decimals).
+     * @param s                Reference to AppStorage.
+     */
     function _settleEvent(
         uint256 _eventId,
         uint256 _settlementPrice,
@@ -330,10 +424,21 @@ contract BlockFinaXOracleFacet {
     //                      VIEW FUNCTIONS
     // ============================================================
 
+    /**
+     * @notice Get the list of all currently registered oracle wallet addresses.
+     * @return Array of registered oracle addresses.
+     */
     function getOracles() external view returns (address[] memory) {
         return LibOracleStorage.oracleStorage().oracles;
     }
 
+    /**
+     * @notice Get the current oracle consensus configuration.
+     * @return requiredSigners Minimum agreeing submissions needed for consensus.
+     * @return toleranceBps    Maximum allowed price spread in basis points (e.g. 100 = 1%).
+     * @return oracleCount     Number of currently registered oracle wallets.
+     * @return maxOracles      Hard cap on oracle wallets (MAX_ORACLES = 10).
+     */
     function getOracleConfig()
         external
         view
@@ -348,6 +453,11 @@ contract BlockFinaXOracleFacet {
         return (os.requiredSigners, os.toleranceBps, os.oracles.length, MAX_ORACLES);
     }
 
+    /**
+     * @notice Check whether an address is a registered oracle wallet.
+     * @param _oracle The address to check.
+     * @return True if the address is authorised to call submitRate().
+     */
     function isAuthorisedOracle(address _oracle)
         external
         view
@@ -356,6 +466,15 @@ contract BlockFinaXOracleFacet {
         return LibOracleStorage.oracleStorage().isOracle[_oracle];
     }
 
+    /**
+     * @notice Get the submission details for a specific oracle on a specific event.
+     * @param _eventId The hedge event ID.
+     * @param _oracle  The oracle wallet address.
+     * @return price     The price submitted by this oracle (6 decimals). 0 if no submission.
+     * @return timestamp Unix timestamp when the submission was recorded.
+     * @return exists    Whether a submission exists for this oracle on this event.
+     * @return isStale   Whether the submission is older than STALE_THRESHOLD (15 minutes).
+     */
     function getSubmission(uint256 _eventId, address _oracle)
         external
         view
@@ -373,6 +492,12 @@ contract BlockFinaXOracleFacet {
         return (sub.price, sub.timestamp, sub.exists, stale);
     }
 
+    /**
+     * @notice Get the number of oracles that have submitted a price for an event.
+     * @dev Includes stale submissions. Use getAllSubmissions() to check staleness.
+     * @param _eventId The hedge event ID.
+     * @return Number of oracles with a submission on record for this event.
+     */
     function getSubmitterCount(uint256 _eventId)
         external
         view
@@ -381,6 +506,14 @@ contract BlockFinaXOracleFacet {
         return LibOracleStorage.oracleStorage().submitters[_eventId].length;
     }
 
+    /**
+     * @notice Get all current oracle submissions for a hedge event.
+     * @param _eventId The hedge event ID.
+     * @return oracleAddresses Array of oracle wallet addresses that have submitted.
+     * @return prices          Array of submitted prices (6 decimals), parallel to oracleAddresses.
+     * @return timestamps      Array of submission timestamps, parallel to oracleAddresses.
+     * @return isStale         Array of staleness flags (true if age > 15 min), parallel to oracleAddresses.
+     */
     function getAllSubmissions(uint256 _eventId)
         external
         view
