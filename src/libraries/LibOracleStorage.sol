@@ -67,6 +67,10 @@ library LibOracleStorage {
         uint256 toleranceBps;
         mapping(uint256 => mapping(address => Submission)) submissions;
         mapping(uint256 => address[]) submitters;
+        /// @dev Per-event, per-oracle timestamp of last submission.
+        ///      Enforces RESUBMIT_COOLDOWN (5 min) between successive submissions from the same oracle.
+        ///      Prevents rapid overwrite attacks that would perpetually reset consensus.
+        mapping(uint256 => mapping(address => uint256)) lastSubmitTime;
     }
 
     /**

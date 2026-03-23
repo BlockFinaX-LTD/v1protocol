@@ -171,6 +171,9 @@ contract BlockFinaXHedgeFacet {
     /// @notice Emitted when stranded ETH is rescued by the owner.
     event ETHRescued(address indexed to, uint256 amount);
 
+    /// @notice Emitted when expired unclaimed payouts are recovered by the owner after the grace period.
+    event ExpiredPayoutsRecovered(uint256 indexed eventId, uint256 amount);
+
     // ============================================================
     //                       MODIFIERS
     // ============================================================
@@ -358,6 +361,49 @@ contract BlockFinaXHedgeFacet {
     }
 
     /**
+     * @notice Recover USDC reserved for unclaimed hedger payouts after a grace period.
+     * @dev After an event is settled, winning hedgers have PAYOUT_CLAIM_GRACE (90 days) to
+     *      call claimPayout(). If they do not, their reserved payout was deducted from LP
+     *      withdrawals via totalMaxPayout but never actually transferred.  This function
+     *      sweeps the residual (totalMaxPayout - totalPayoutClaimed) into platform fees so
+     *      that funds are never permanently locked in the contract.
+     *
+     *      Safety guarantees:
+     *        - Requires the event to be Settled and at least 90 days past settlement.
+     *        - Idempotent: sets totalMaxPayout = totalPayoutClaimed so a second call is a no-op.
+     *        - Uses CEI: state updated before interaction.
+     *
+     * @param _eventId The settled event whose unclaimed payouts should be recovered.
+     */
+    function recoverExpiredPayouts(uint256 _eventId) external onlyOwner nonReentrant {
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
+
+        require(evt.id > 0, "Event not found");
+        require(evt.status == LibAppStorage.HedgeEventStatus.Settled, "Event not settled");
+        require(evt.triggered, "Event did not trigger: no payouts reserved");
+        require(
+            block.timestamp >= evt.settledAt + 90 days,
+            "Grace period not elapsed (90 days from settlement)"
+        );
+
+        uint256 reserved = evt.totalMaxPayout;
+        uint256 claimed  = evt.totalPayoutClaimed;
+
+        require(reserved > claimed, "No unclaimed payouts to recover");
+
+        uint256 residual = reserved - claimed;
+
+        // Mark as reconciled — further calls to this function are no-ops.
+        evt.totalMaxPayout = claimed;
+
+        // Sweep residual into platform fees for withdrawal by the owner.
+        s.hedgePlatformFeesCollected += residual;
+
+        emit ExpiredPayoutsRecovered(_eventId, residual);
+    }
+
+    /**
      * @notice Rescue any ETH accidentally sent to the Diamond contract.
      * @dev This contract is USDC-only. ETH has no legitimate purpose here.
      *      The Diamond's receive() reverts direct ETH sends after this fix,
@@ -454,7 +500,9 @@ contract BlockFinaXHedgeFacet {
         // --- Checks ---
         require(s.feesInitialized, "Fees not initialized: call initializeHedgeFees first");
         require(bytes(_params.name).length > 0, "Name required");
+        require(bytes(_params.name).length <= 128, "Name too long (max 128 bytes)");
         require(bytes(_params.underlying).length > 0, "Underlying required");
+        require(bytes(_params.underlying).length <= 32, "Underlying too long (max 32 bytes)");
         require(_params.strike > 0, "Strike must be > 0");
         require(_params.premiumRate > 0, "Premium rate must be > 0");
         require(_params.premiumRate <= PRECISION, "Premium rate cannot exceed 100%");
@@ -846,6 +894,9 @@ contract BlockFinaXHedgeFacet {
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[pos.eventId];
         evt.creatorEarnings += creatorReward;
         s.hedgePlatformFeesCollected += (payoutFee - creatorReward);
+
+        // Track total USDC actually paid out for this event (used by recoverExpiredPayouts).
+        evt.totalPayoutClaimed += grossPayout;
 
         pos.claimed = true;
         pos.status = LibAppStorage.HedgePositionStatus.Claimed;

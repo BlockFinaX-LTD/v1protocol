@@ -51,6 +51,11 @@ contract BlockFinaXOracleFacet {
     /// @dev Submissions older than this threshold (seconds) are excluded from consensus.
     uint256 constant STALE_THRESHOLD = 15 * 60;
 
+    /// @dev Minimum time (seconds) an oracle must wait before overwriting its own submission
+    ///      for the same event. Prevents a malicious/faulty oracle from rapidly oscillating
+    ///      between prices to repeatedly clear consensus and DoS settlement.
+    uint256 constant RESUBMIT_COOLDOWN = 5 * 60;
+
     /// @dev Maximum number of oracle wallets that can be registered.
     ///      Bounds the loop in _checkConsensus() and removeOracle().
     uint256 constant MAX_ORACLES = 10;
@@ -259,10 +264,23 @@ contract BlockFinaXOracleFacet {
         );
         require(_price > 0, "Invalid price");
 
+        // Resubmission cooldown: applies to ALL submissions, including those in a new round
+        // after a previous round was cleared. This prevents a malicious oracle from rapidly
+        // cycling through submission rounds (submit → clear-by-disagreement → resubmit → repeat)
+        // to perpetually block consensus (DoS attack vector).
+        uint256 lastSubmit = os.lastSubmitTime[_eventId][msg.sender];
+        if (lastSubmit > 0) {
+            require(
+                block.timestamp >= lastSubmit + RESUBMIT_COOLDOWN,
+                "Resubmit cooldown: wait 5 minutes between submissions for this event"
+            );
+        }
+
         if (!os.submissions[_eventId][msg.sender].exists) {
             os.submitters[_eventId].push(msg.sender);
         }
 
+        os.lastSubmitTime[_eventId][msg.sender] = block.timestamp;
         os.submissions[_eventId][msg.sender] = LibOracleStorage.Submission({
             price: _price,
             timestamp: block.timestamp,

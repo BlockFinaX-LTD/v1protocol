@@ -101,6 +101,9 @@ library LibAppStorage {
         uint256 initialRate;
         uint256 totalMaxPayout;
         bool strikeAbove;
+        /// @dev Running total of USDC actually paid out via claimPayout(). Added in v2.
+        ///      Appended at end of struct to preserve storage layout for existing deployments.
+        uint256 totalPayoutClaimed;
     }
 
     /**
