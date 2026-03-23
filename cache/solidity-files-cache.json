@@ -584,8 +584,8 @@
       ]
     },
     "/home/runner/workspace/contracts/src/libraries/LibOracleStorage.sol": {
-      "lastModificationDate": 1774232172932,
-      "contentHash": "79699a854d63ab595b7d0bbbf6e493ff",
+      "lastModificationDate": 1774235088004,
+      "contentHash": "b9fa3f0f0eb0ad1f30523fb470fa6abf",
       "sourceName": "src/libraries/LibOracleStorage.sol",
       "solcConfig": {
         "version": "0.8.20",

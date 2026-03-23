@@ -37,9 +37,21 @@ async function main() {
   console.log("New HedgeFacet:", newHedgeAddress);
 
   const newSelectors = [
+    // ── Admin ──────────────────────────────────────────────────────────────
     newHedgeFacet.interface.getFunction("initializeHedgeFees").selector,
     newHedgeFacet.interface.getFunction("setOracleAdmin").selector,
     newHedgeFacet.interface.getFunction("withdrawPlatformFees").selector,
+    // Two-step ownership (new in security hardening)
+    newHedgeFacet.interface.getFunction("transferOwnership").selector,
+    newHedgeFacet.interface.getFunction("acceptOwnership").selector,
+    newHedgeFacet.interface.getFunction("pendingOwner").selector,
+    // Emergency pause (new in security hardening)
+    newHedgeFacet.interface.getFunction("pause").selector,
+    newHedgeFacet.interface.getFunction("unpause").selector,
+    // ETH rescue (new in security hardening)
+    newHedgeFacet.interface.getFunction("rescueETH").selector,
+
+    // ── Core lifecycle ──────────────────────────────────────────────────────
     newHedgeFacet.interface.getFunction("createEvent").selector,
     newHedgeFacet.interface.getFunction("setPoolSettings").selector,
     newHedgeFacet.interface.getFunction("deposit").selector,
@@ -49,6 +61,10 @@ async function main() {
     newHedgeFacet.interface.getFunction("claimPremiums").selector,
     newHedgeFacet.interface.getFunction("withdrawCapital").selector,
     newHedgeFacet.interface.getFunction("withdrawCreatorEarnings").selector,
+
+    // ── Views ───────────────────────────────────────────────────────────────
+    newHedgeFacet.interface.getFunction("isPaused").selector,
+    newHedgeFacet.interface.getFunction("isFeesInitialized").selector,
     newHedgeFacet.interface.getFunction("getHedgeEventCore").selector,
     newHedgeFacet.interface.getFunction("getHedgeEventStats").selector,
     newHedgeFacet.interface.getFunction("getHedgePosition").selector,
@@ -109,7 +125,7 @@ async function main() {
     facet: "blockFinaXHedge",
     oldAddress: OLD_HEDGE_FACET,
     newAddress: newHedgeAddress,
-    change: "Bidirectional hedging: strikeAbove bool — support both upward and downward hedge directions",
+    change: "Security hardening: reentrancy guards, CEI ordering, pause mechanism, two-step ownership, loop caps, fee init guard, max expiry, premium rate cap, precision fix, ETH rescue",
     timestamp: new Date().toISOString()
   });
   fs.writeFileSync(deploymentFile, JSON.stringify(deployment, null, 2));
