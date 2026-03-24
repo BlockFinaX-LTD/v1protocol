@@ -76,6 +76,8 @@
   "hedgeV3": {
     "facet": "0x484c2c3fD0bB094665A628a65f4f9908A4d7D00C",
     "upgradeTx": "0x05a6abfd64b1222baccfb0188c7a1984c1ca5ae88442fd2eef07255b21e0b452",
-    "note": "Per-event payment token (USDC/USDT). 33 selectors replaced, 6 added. USDC whitelisted."
+    "note": "Per-event payment token (USDC/USDT). 33 selectors replaced, 6 added. USDC + USDT whitelisted.",
+    "usdtToken": "0x05D032ac25d322df992303dCa074EE7392C117b9",
+    "usdtWhitelistTx": "0xe61ca013f338d3325ac932ae8ca411417e939b1f0b34812a9f3aa31df4bcd814"
   }
 }
