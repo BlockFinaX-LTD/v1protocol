@@ -412,7 +412,7 @@ contract BlockFinaXHedgeFacet {
      *
      * @param _to Recipient address for the rescued ETH. Cannot be address(0).
      */
-    function rescueETH(address payable _to) external onlyOwner {
+    function rescueETH(address payable _to) external onlyOwner nonReentrant {
         require(_to != address(0), "Zero address");
         uint256 balance = address(this).balance;
         require(balance > 0, "No ETH to rescue");
