@@ -6,7 +6,7 @@
   "facets": {
     "blockFinaXDiamondCut": "0x289eE379b00e3B20c4BaD64a525B0b0D123a7d0c",
     "blockFinaXDiamondLoupe": "0xB13D148ccd95e045AB6b501ab8961c61b1c56d9d",
-    "blockFinaXHedge": "0x9Dc3eD28156Fd09D793489cd63f723B0e4224AD3",
+    "blockFinaXHedge": "0x0e7F475552c0165d864DFc0d4F02dd2c8a7B2367",
     "blockFinaXOracle": "0x613b73eE647888e3947df488F0E633EB7DAE1F21",
     "blockFinaXOwnership": "0x024e16661fA238Cd6B0d71EaB1E955c5860A3dA4"
   },
@@ -22,11 +22,35 @@
     "oracleAdmin": "0xef5Bed7c221c85A2c88e3c0223ee45482d6F037d"
   },
   "oracle": {
-    "requiredSigners": 0,
-    "toleranceBps": 0,
-    "registeredOracles": [],
+    "requiredSigners": 2,
+    "toleranceBps": 100,
+    "registeredOracles": [
+      {
+        "name": "Oracle A",
+        "address": "0x1F038152d5E6F120E26f8F11688cB9Dc27703236",
+        "envKey": "ORACLE_KEY_A",
+        "node": "server/multi-oracle/run-oracle-a.ts"
+      },
+      {
+        "name": "Oracle B",
+        "address": "0x488F6090Ede627cddf3f4f12E46FB5665EBBCcfA",
+        "envKey": "ORACLE_KEY_B",
+        "node": "server/multi-oracle/run-oracle-b.ts"
+      },
+      {
+        "name": "Oracle C",
+        "address": "0x4fA8B101ed6E80F06D3eB2910381ff2901a0cbD3",
+        "envKey": "ORACLE_KEY_C",
+        "node": "server/multi-oracle/run-oracle-c.ts"
+      }
+    ],
     "diamondCutTx": "0xff0d060abe445cc719b33e6b39048ef38838d8fbfadf3182dd34c1213f9d7e7d",
-    "deployedAt": "2026-03-24"
+    "addOracleTxs": [
+      "0xe204b74454d423a3afd433c33038f0feade7625728ecc8bf2d0586e4eb544bdb",
+      "0x5d77f1e6ac2969b5b27c7a459b9b1fe40694a1bf55ab0f0da8298253e4091772",
+      "0x11348b51721980de4a4635ca4df98121cbacf39ef12f64ce78fe0d058d0885f0"
+    ],
+    "note": "Multi-oracle active. Oracle wallets need testnet ETH for gas before nodes can start."
   },
   "ownership": {
     "currentOwner": "0xef5Bed7c221c85A2c88e3c0223ee45482d6F037d",

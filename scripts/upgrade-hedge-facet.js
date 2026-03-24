@@ -23,11 +23,22 @@ async function main() {
 
   const LOUPE_ABI = [
     'function facetFunctionSelectors(address _facet) external view returns (bytes4[] memory facetFunctionSelectors_)',
+    'function facets() external view returns (tuple(address facetAddress, bytes4[] functionSelectors)[] memory)',
   ];
   const loupe = await hre.ethers.getContractAt(LOUPE_ABI, DIAMOND_ADDRESS);
   const oldSelectorsRaw = await loupe.facetFunctionSelectors(OLD_HEDGE_FACET);
   const oldSelectors = Array.from(oldSelectorsRaw);
   console.log(`\nOld HedgeFacet has ${oldSelectors.length} selectors registered in Diamond`);
+
+  // Collect all selectors registered in OTHER facets so we don't try to double-add them
+  const allFacets = await loupe.facets();
+  const otherFacetSelectors = new Set();
+  allFacets.forEach((f) => {
+    if (f.facetAddress.toLowerCase() !== OLD_HEDGE_FACET.toLowerCase()) {
+      f.functionSelectors.forEach((s) => otherFacetSelectors.add(s.toLowerCase()));
+    }
+  });
+  console.log(`Selectors in other facets (will skip): ${otherFacetSelectors.size}`);
 
   console.log("\nDeploying new HedgeFacet...");
   const HedgeFacet = await hre.ethers.getContractFactory("BlockFinaXHedgeFacet");
@@ -36,56 +47,23 @@ async function main() {
   const newHedgeAddress = await newHedgeFacet.getAddress();
   console.log("New HedgeFacet:", newHedgeAddress);
 
-  const newSelectors = [
-    // ── Admin ──────────────────────────────────────────────────────────────
-    newHedgeFacet.interface.getFunction("initializeHedgeFees").selector,
-    newHedgeFacet.interface.getFunction("setOracleAdmin").selector,
-    newHedgeFacet.interface.getFunction("withdrawPlatformFees").selector,
-    // Two-step ownership (new in security hardening)
-    newHedgeFacet.interface.getFunction("transferOwnership").selector,
-    newHedgeFacet.interface.getFunction("acceptOwnership").selector,
-    newHedgeFacet.interface.getFunction("pendingOwner").selector,
-    // Emergency pause (new in security hardening)
-    newHedgeFacet.interface.getFunction("pause").selector,
-    newHedgeFacet.interface.getFunction("unpause").selector,
-    // ETH rescue (new in security hardening)
-    newHedgeFacet.interface.getFunction("rescueETH").selector,
-
-    // ── Core lifecycle ──────────────────────────────────────────────────────
-    newHedgeFacet.interface.getFunction("createEvent").selector,
-    newHedgeFacet.interface.getFunction("setPoolSettings").selector,
-    newHedgeFacet.interface.getFunction("deposit").selector,
-    newHedgeFacet.interface.getFunction("buyProtection").selector,
-    newHedgeFacet.interface.getFunction("settleEvent").selector,
-    newHedgeFacet.interface.getFunction("claimPayout").selector,
-    newHedgeFacet.interface.getFunction("claimPremiums").selector,
-    newHedgeFacet.interface.getFunction("withdrawCapital").selector,
-    newHedgeFacet.interface.getFunction("withdrawCreatorEarnings").selector,
-
-    // ── Views ───────────────────────────────────────────────────────────────
-    newHedgeFacet.interface.getFunction("isPaused").selector,
-    newHedgeFacet.interface.getFunction("isFeesInitialized").selector,
-    newHedgeFacet.interface.getFunction("getHedgeEventCore").selector,
-    newHedgeFacet.interface.getFunction("getHedgeEventStats").selector,
-    newHedgeFacet.interface.getFunction("getHedgePosition").selector,
-    newHedgeFacet.interface.getFunction("getHedgeLpDeposit").selector,
-    newHedgeFacet.interface.getFunction("getEventPositionIds").selector,
-    newHedgeFacet.interface.getFunction("getEventDepositIds").selector,
-    newHedgeFacet.interface.getFunction("getCreatorEventIds").selector,
-    newHedgeFacet.interface.getFunction("getHedgerPositionIds").selector,
-    newHedgeFacet.interface.getFunction("getLpDepositIds").selector,
-    newHedgeFacet.interface.getFunction("getHedgeFeeConfig").selector,
-    newHedgeFacet.interface.getFunction("getHedgePlatformFees").selector,
-    newHedgeFacet.interface.getFunction("getTotalHedgeEvents").selector,
-    newHedgeFacet.interface.getFunction("getPoolUtilization").selector,
-  ];
+  // Derive all selectors directly from the compiled ABI — no manual list needed
+  const newSelectors = newHedgeFacet.interface.fragments
+    .filter((f) => f.type === "function")
+    .map((f) => f.selector);
 
   const newSelectorSet = new Set(newSelectors);
   const oldSelectorSet = new Set(oldSelectors.map(s => s.toLowerCase()));
 
   const toRemove = oldSelectors.filter(s => !newSelectorSet.has(s.toLowerCase()) && !newSelectorSet.has(s));
-  const toAdd = newSelectors.filter(s => !oldSelectorSet.has(s.toLowerCase()));
+  // Skip selectors already registered in other facets (e.g. transferOwnership in OwnershipFacet)
+  const toAdd = newSelectors.filter(s => !oldSelectorSet.has(s.toLowerCase()) && !otherFacetSelectors.has(s.toLowerCase()));
   const toReplace = newSelectors.filter(s => oldSelectorSet.has(s.toLowerCase()));
+
+  const skippedDueToOtherFacet = newSelectors.filter(s => otherFacetSelectors.has(s.toLowerCase()));
+  if (skippedDueToOtherFacet.length > 0) {
+    console.log(`\nSkipping ${skippedDueToOtherFacet.length} selector(s) already in other facets:`, skippedDueToOtherFacet);
+  }
 
   console.log(`\nSelectors to Remove: ${toRemove.length}`);
   console.log(`Selectors to Add:    ${toAdd.length}`);
