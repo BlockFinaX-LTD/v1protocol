@@ -171,6 +171,12 @@ contract BlockFinaXHedgeFacet {
     /// @notice Emitted when stranded ETH is rescued by the owner.
     event ETHRescued(address indexed to, uint256 amount);
 
+    /// @notice Emitted when a token is added to or removed from the payment token whitelist.
+    event PaymentTokenSet(address indexed token, bool allowed);
+
+    /// @notice Emitted when the owner withdraws platform fees denominated in a specific token.
+    event PlatformFeesByTokenWithdrawn(address indexed token, address indexed admin, uint256 amount);
+
     /// @notice Emitted when expired unclaimed payouts are recovered by the owner after the grace period.
     event ExpiredPayoutsRecovered(uint256 indexed eventId, uint256 amount);
 
@@ -399,6 +405,7 @@ contract BlockFinaXHedgeFacet {
 
         // Sweep residual into platform fees for withdrawal by the owner.
         s.hedgePlatformFeesCollected += residual;
+        s.platformFeesByToken[_getEventToken(s, evt)] += residual;
 
         emit ExpiredPayoutsRecovered(_eventId, residual);
     }
@@ -419,6 +426,86 @@ contract BlockFinaXHedgeFacet {
         (bool ok, ) = _to.call{value: balance}("");
         require(ok, "ETH transfer failed");
         emit ETHRescued(_to, balance);
+    }
+
+    // ============================================================
+    //                    PAYMENT TOKEN MANAGEMENT (v3)
+    // ============================================================
+
+    /**
+     * @notice Add or remove a stablecoin from the payment token whitelist.
+     * @dev Only whitelisted tokens (or the default usdcToken) can be used when creating a new
+     *      hedge event. Both USDC and USDT use 6 decimals, so all existing fee calculations
+     *      work correctly without modification.
+     *      Removing a token from the whitelist has no effect on events already created with it.
+     *
+     * @param _token   ERC-20 token contract address to whitelist or de-list.
+     * @param _allowed True to allow; false to remove from whitelist.
+     */
+    function setAllowedPaymentToken(address _token, bool _allowed) external onlyOwner {
+        require(_token != address(0), "Zero address");
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        s.allowedPaymentTokens[_token] = _allowed;
+        emit PaymentTokenSet(_token, _allowed);
+    }
+
+    /**
+     * @notice Returns true if `_token` is whitelisted as a valid payment token.
+     * @dev The default usdcToken is always accepted regardless of this mapping.
+     * @param _token The token address to check.
+     * @return True if the token can be used when creating a new event.
+     */
+    function isAllowedPaymentToken(address _token) external view returns (bool) {
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        // The global default is always implicitly allowed.
+        if (_token == s.usdcToken) return true;
+        return s.allowedPaymentTokens[_token];
+    }
+
+    /**
+     * @notice Returns the payment token address for a specific hedge event.
+     * @dev Pre-v3 events stored address(0); this returns the global usdcToken for those.
+     * @param _eventId The event to query.
+     * @return The ERC-20 token used for all payments in that event.
+     */
+    function getEventPaymentToken(uint256 _eventId) external view returns (address) {
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
+        require(evt.id > 0, "Event not found");
+        return _getEventToken(s, evt);
+    }
+
+    /**
+     * @notice Get the accumulated platform fees for a specific payment token.
+     * @param _token The payment token to query. Use the USDC address for USDC fees.
+     * @return Accumulated fees in `_token` units (6 decimals for stablecoins).
+     */
+    function getPlatformFeesByToken(address _token) external view returns (uint256) {
+        return LibAppStorage.appStorage().platformFeesByToken[_token];
+    }
+
+    /**
+     * @notice Withdraw accumulated platform fees for a specific payment token.
+     * @dev For USDC fees use this or the legacy withdrawPlatformFees(). For USDT or other
+     *      whitelisted tokens, this is the only withdrawal path.
+     *      Uses CEI: balance decremented before transfer.
+     *
+     * @param _token   The token whose fees to withdraw.
+     * @param _amount  Amount to withdraw (6 decimals).
+     */
+    function withdrawPlatformFeesByToken(address _token, uint256 _amount) external onlyOwner nonReentrant {
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        require(_amount > 0, "Amount must be > 0");
+        require(_amount <= s.platformFeesByToken[_token], "Exceeds available fees for token");
+
+        s.platformFeesByToken[_token] -= _amount;
+        // Keep the legacy aggregate counter in sync when withdrawing USDC fees this way.
+        if (_token == s.usdcToken && _amount <= s.hedgePlatformFeesCollected) {
+            s.hedgePlatformFeesCollected -= _amount;
+        }
+
+        IERC20(_token).safeTransfer(msg.sender, _amount);
+        emit PlatformFeesByTokenWithdrawn(_token, msg.sender, _amount);
     }
 
     // ============================================================
@@ -463,6 +550,9 @@ contract BlockFinaXHedgeFacet {
      * @param strikeAbove     Direction of the hedge.
      *                        true  = hedger wins if price rises to or above strike (USD weakens).
      *                        false = hedger wins if price falls to or below strike (USD strengthens).
+     * @param paymentToken    ERC-20 stablecoin to use for all payments in this event.
+     *                        Must be whitelisted via setAllowedPaymentToken(). Pass address(0)
+     *                        to use the default usdcToken (always accepted, no whitelist check).
      */
     struct CreateEventParams {
         string name;
@@ -474,6 +564,7 @@ contract BlockFinaXHedgeFacet {
         uint256 initialLiquidity;
         uint256 initialRate;
         bool strikeAbove;
+        address paymentToken;
     }
 
     /**
@@ -525,19 +616,30 @@ contract BlockFinaXHedgeFacet {
             );
         }
 
+        // Resolve and validate payment token.
+        // address(0) silently uses the default usdcToken; any other address must be whitelisted.
+        address token = _params.paymentToken == address(0)
+            ? s.usdcToken
+            : _params.paymentToken;
+        if (token != s.usdcToken) {
+            require(s.allowedPaymentTokens[token], "Payment token not whitelisted");
+        }
+
         // --- Effects ---
-        s.hedgePlatformFeesCollected += s.hedgeFeeConfig.eventCreationFee;
+        uint256 creationFee = s.hedgeFeeConfig.eventCreationFee;
+        s.hedgePlatformFeesCollected += creationFee;
+        s.platformFeesByToken[token] += creationFee;
 
         uint256 eventId = ++s.hedgeEventCounter;
         s.totalHedgeEvents++;
 
-        _initHedgeEvent(s, eventId, _params);
+        _initHedgeEvent(s, eventId, _params, token);
 
         uint256 depositId = _createInitialDeposit(s, eventId, _params.initialLiquidity);
 
         // --- Interactions ---
-        uint256 totalAmount = s.hedgeFeeConfig.eventCreationFee + _params.initialLiquidity;
-        IERC20(s.usdcToken).safeTransferFrom(msg.sender, address(this), totalAmount);
+        uint256 totalAmount = creationFee + _params.initialLiquidity;
+        IERC20(token).safeTransferFrom(msg.sender, address(this), totalAmount);
 
         emit HedgeEventCreated(
             eventId, msg.sender, _params.underlying, _params.strike,
@@ -553,10 +655,12 @@ contract BlockFinaXHedgeFacet {
     }
 
     /// @dev Initialises the HedgeEvent storage struct and registers the creator's event ID.
+    ///      `_resolvedToken` is the final payment token address already validated by createEvent().
     function _initHedgeEvent(
         LibAppStorage.AppStorage storage s,
         uint256 eventId,
-        CreateEventParams memory _params
+        CreateEventParams memory _params,
+        address _resolvedToken
     ) internal {
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[eventId];
         evt.id = eventId;
@@ -574,7 +678,22 @@ contract BlockFinaXHedgeFacet {
         evt.initialRate = _params.initialRate;
         evt.strikeAbove = _params.strikeAbove;
         evt.createdAt = block.timestamp;
+        // Store the resolved token. For USDC events this is s.usdcToken; zero address is
+        // never stored here — the resolution already happened in createEvent().
+        evt.paymentToken = _resolvedToken;
         s.hedgeCreatorEventIds[msg.sender].push(eventId);
+    }
+
+    /**
+     * @dev Return the payment token for an event.
+     *      Pre-v3 events have paymentToken == address(0); this falls back to the global usdcToken
+     *      so all existing events continue working correctly without any migration.
+     */
+    function _getEventToken(
+        LibAppStorage.AppStorage storage s,
+        LibAppStorage.HedgeEvent storage evt
+    ) internal view returns (address) {
+        return evt.paymentToken == address(0) ? s.usdcToken : evt.paymentToken;
     }
 
     /**
@@ -696,7 +815,7 @@ contract BlockFinaXHedgeFacet {
         s.lpDepositIds[msg.sender].push(depositId);
 
         // --- Interactions ---
-        IERC20(s.usdcToken).safeTransferFrom(msg.sender, address(this), _amount);
+        IERC20(_getEventToken(s, evt)).safeTransferFrom(msg.sender, address(this), _amount);
 
         emit LiquidityDeposited(_eventId, depositId, msg.sender, _amount, shares);
 
@@ -791,10 +910,14 @@ contract BlockFinaXHedgeFacet {
 
         uint256 creatorReward = (platformFee * s.hedgeFeeConfig.creatorLoyaltyRate) / PRECISION;
         evt.creatorEarnings += creatorReward;
-        s.hedgePlatformFeesCollected += (platformFee - creatorReward);
+        uint256 netPlatformFee = platformFee - creatorReward;
+        s.hedgePlatformFeesCollected += netPlatformFee;
+
+        address token = _getEventToken(s, evt);
+        s.platformFeesByToken[token] += netPlatformFee;
 
         // --- Interactions ---
-        IERC20(s.usdcToken).safeTransferFrom(msg.sender, address(this), totalCost);
+        IERC20(token).safeTransferFrom(msg.sender, address(this), totalCost);
 
         emit ProtectionPurchased(
             _eventId, positionId, msg.sender,
@@ -893,15 +1016,19 @@ contract BlockFinaXHedgeFacet {
         uint256 creatorReward = (payoutFee * s.hedgeFeeConfig.creatorLoyaltyRate) / PRECISION;
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[pos.eventId];
         evt.creatorEarnings += creatorReward;
-        s.hedgePlatformFeesCollected += (payoutFee - creatorReward);
+        uint256 netPayoutFee = payoutFee - creatorReward;
+        s.hedgePlatformFeesCollected += netPayoutFee;
 
-        // Track total USDC actually paid out for this event (used by recoverExpiredPayouts).
+        address token = _getEventToken(s, evt);
+        s.platformFeesByToken[token] += netPayoutFee;
+
+        // Track total tokens actually paid out for this event (used by recoverExpiredPayouts).
         evt.totalPayoutClaimed += grossPayout;
 
         pos.claimed = true;
         pos.status = LibAppStorage.HedgePositionStatus.Claimed;
 
-        IERC20(s.usdcToken).safeTransfer(msg.sender, netPayout);
+        IERC20(token).safeTransfer(msg.sender, netPayout);
 
         emit PayoutClaimed(_positionId, msg.sender, grossPayout, payoutFee, netPayout);
     }
@@ -938,11 +1065,15 @@ contract BlockFinaXHedgeFacet {
         uint256 creatorReward = (lpFee * s.hedgeFeeConfig.creatorLoyaltyRate) / PRECISION;
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[dep.eventId];
         evt.creatorEarnings += creatorReward;
-        s.hedgePlatformFeesCollected += (lpFee - creatorReward);
+        uint256 netLpFee = lpFee - creatorReward;
+        s.hedgePlatformFeesCollected += netLpFee;
+
+        address token = _getEventToken(s, evt);
+        s.platformFeesByToken[token] += netLpFee;
 
         dep.premiumsClaimed += claimable;
 
-        IERC20(s.usdcToken).safeTransfer(msg.sender, netAmount);
+        IERC20(token).safeTransfer(msg.sender, netAmount);
 
         emit PremiumsClaimed(_depositId, msg.sender, claimable, lpFee, netAmount);
     }
@@ -994,7 +1125,7 @@ contract BlockFinaXHedgeFacet {
         }
 
         if (withdrawAmount > 0) {
-            IERC20(s.usdcToken).safeTransfer(msg.sender, withdrawAmount);
+            IERC20(_getEventToken(s, evt)).safeTransfer(msg.sender, withdrawAmount);
         }
 
         emit CapitalWithdrawn(_depositId, msg.sender, withdrawAmount);
@@ -1023,7 +1154,7 @@ contract BlockFinaXHedgeFacet {
         uint256 amount = evt.creatorEarnings;
         evt.creatorEarnings = 0;
 
-        IERC20(s.usdcToken).safeTransfer(msg.sender, amount);
+        IERC20(_getEventToken(s, evt)).safeTransfer(msg.sender, amount);
 
         emit CreatorEarningsWithdrawn(_eventId, msg.sender, amount);
     }

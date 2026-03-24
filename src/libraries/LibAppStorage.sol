@@ -104,6 +104,10 @@ library LibAppStorage {
         /// @dev Running total of USDC actually paid out via claimPayout(). Added in v2.
         ///      Appended at end of struct to preserve storage layout for existing deployments.
         uint256 totalPayoutClaimed;
+
+        /// @dev Stablecoin used for all payments in this event (USDC, USDT, etc.). Added in v3.
+        ///      Zero address falls back to s.usdcToken so pre-v3 events continue working unchanged.
+        address paymentToken;
     }
 
     /**
@@ -258,6 +262,19 @@ library LibAppStorage {
         /// @dev Confirms that initializeHedgeFees() has been called at least once.
         ///      createEvent() reverts until this is true.
         bool feesInitialized;
+
+        // ============================================================
+        //                    MULTI-TOKEN SUPPORT (v3)
+        // ============================================================
+
+        /// @dev Whitelist of stablecoin tokens that creators can choose as the payment currency
+        ///      when creating a new hedge event. The default (usdcToken) is always implicitly allowed.
+        mapping(address => bool) allowedPaymentTokens;
+
+        /// @dev Platform fees accumulated per payment token. Replaces the single
+        ///      hedgePlatformFeesCollected counter for multi-token accounting.
+        ///      hedgePlatformFeesCollected is kept for backward compatibility with existing reads.
+        mapping(address => uint256) platformFeesByToken;
     }
 
     /**
