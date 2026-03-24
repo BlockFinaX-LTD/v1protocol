@@ -11,10 +11,9 @@
 
 const hre = require("hardhat");
 
-const OWNABLE2STEP_ABI = [
-  "function owner() view returns (address)",
+const DIAMOND_ABI = [
   "function pendingOwner() view returns (address)",
-  "function transferOwnership(address newOwner)",
+  "function transferOwnership(address _newOwner)",
 ];
 
 async function main() {
@@ -27,24 +26,18 @@ async function main() {
     throw new Error("Set DIAMOND_ADDRESS and SAFE_ADDRESS env vars");
   }
 
-  const diamond = new hre.ethers.Contract(DIAMOND_ADDRESS, OWNABLE2STEP_ABI, deployer);
+  const diamond = new hre.ethers.Contract(DIAMOND_ADDRESS, DIAMOND_ABI, deployer);
 
-  const currentOwner  = await diamond.owner();
-  const pendingOwner  = await diamond.pendingOwner();
+  const pendingOwner = await diamond.pendingOwner();
 
   console.log("Diamond:        ", DIAMOND_ADDRESS);
-  console.log("Current owner:  ", currentOwner);
+  console.log("Deployer:       ", deployer.address);
   console.log("Pending owner:  ", pendingOwner);
   console.log("Safe address:   ", SAFE_ADDRESS);
-  console.log("Deployer:       ", deployer.address);
-
-  if (currentOwner.toLowerCase() !== deployer.address.toLowerCase()) {
-    throw new Error(`Deployer is not the current owner (owner is ${currentOwner})`);
-  }
 
   if (pendingOwner.toLowerCase() === SAFE_ADDRESS.toLowerCase()) {
     console.log("\nTransfer already initiated — Safe just needs to call acceptOwnership()");
-    console.log("Run safe-create-tx.js with action=acceptOwnership");
+    console.log("Run safe-create-tx.js with ACTION=acceptOwnership");
     return;
   }
 
@@ -56,9 +49,8 @@ async function main() {
   const newPending = await diamond.pendingOwner();
   console.log("Pending owner now:", newPending);
   console.log("\n✅ Step 1 done — Safe must now call acceptOwnership() to complete the transfer.");
-  console.log("   Run: DIAMOND_ADDRESS=" + DIAMOND_ADDRESS + " SAFE_ADDRESS=" + SAFE_ADDRESS);
-  console.log("        npx hardhat run scripts/safe-create-tx.js --network liskSepolia");
-  console.log("        (set ACTION=acceptOwnership in that script)");
+  console.log("   DIAMOND_ADDRESS=" + DIAMOND_ADDRESS + " SAFE_ADDRESS=" + SAFE_ADDRESS + " ACTION=acceptOwnership");
+  console.log("   SIGNER_A_KEY=0x... SIGNER_B_KEY=0x... npx hardhat run scripts/safe-create-tx.js --network liskSepolia");
 }
 
 main().catch((err) => {

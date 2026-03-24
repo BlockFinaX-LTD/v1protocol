@@ -7,7 +7,8 @@
     "blockFinaXDiamondCut": "0x289eE379b00e3B20c4BaD64a525B0b0D123a7d0c",
     "blockFinaXDiamondLoupe": "0xB13D148ccd95e045AB6b501ab8961c61b1c56d9d",
     "blockFinaXHedge": "0x9Dc3eD28156Fd09D793489cd63f723B0e4224AD3",
-    "blockFinaXOracle": "0x613b73eE647888e3947df488F0E633EB7DAE1F21"
+    "blockFinaXOracle": "0x613b73eE647888e3947df488F0E633EB7DAE1F21",
+    "blockFinaXOwnership": "0x024e16661fA238Cd6B0d71EaB1E955c5860A3dA4"
   },
   "config": {
     "usdcToken": "0xf52Ad63619Bf9cFeF510341ac6b4038554399562",
@@ -27,6 +28,25 @@
     "diamondCutTx": "0xff0d060abe445cc719b33e6b39048ef38838d8fbfadf3182dd34c1213f9d7e7d",
     "deployedAt": "2026-03-24"
   },
+  "ownership": {
+    "currentOwner": "0xef5Bed7c221c85A2c88e3c0223ee45482d6F037d",
+    "pendingOwner": "0x60719b73880710a2A471C21140515A6Cc8305fDB",
+    "safe": {
+      "address": "0x60719b73880710a2A471C21140515A6Cc8305fDB",
+      "threshold": 2,
+      "owners": [
+        "0xf4Ad53C78b93Ce346BBF16bF3131019549fB7be2",
+        "0xef5Bed7c221c85A2c88e3c0223ee45482d6F037d",
+        "0x942F1d0132be1E6d9cb7111ff0249eD8571F7838"
+      ],
+      "network": "liskSepolia",
+      "chainId": 4202
+    },
+    "transferInitiatedTx": "0xf59c4f7ac12a1d3457f8341290a1fb4a53f149a962a5a7b544d34d11ca48395e",
+    "status": "pending_accept",
+    "note": "Safe must call acceptOwnership() to complete the transfer. Needs 2-of-3 signatures."
+  },
   "deployer": "0xef5Bed7c221c85A2c88e3c0223ee45482d6F037d",
-  "timestamp": "2026-03-01T06:09:30.662Z"
+  "timestamp": "2026-03-01T06:09:30.662Z",
+  "updatedAt": "2026-03-24"
 }
