@@ -69,7 +69,7 @@ module.exports = {
     ]
   },
   sourcify: {
-    enabled: true
+    enabled: false
   },
   paths: {
     sources: "./src",
