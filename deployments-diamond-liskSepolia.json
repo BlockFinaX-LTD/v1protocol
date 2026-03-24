@@ -6,7 +6,7 @@
   "facets": {
     "blockFinaXDiamondCut": "0x289eE379b00e3B20c4BaD64a525B0b0D123a7d0c",
     "blockFinaXDiamondLoupe": "0xB13D148ccd95e045AB6b501ab8961c61b1c56d9d",
-    "blockFinaXHedge": "0x0e7F475552c0165d864DFc0d4F02dd2c8a7B2367",
+    "blockFinaXHedge": "0x484c2c3fD0bB094665A628a65f4f9908A4d7D00C",
     "blockFinaXOracle": "0x613b73eE647888e3947df488F0E633EB7DAE1F21",
     "blockFinaXOwnership": "0x024e16661fA238Cd6B0d71EaB1E955c5860A3dA4"
   },
@@ -72,5 +72,10 @@
   },
   "deployer": "0xef5Bed7c221c85A2c88e3c0223ee45482d6F037d",
   "timestamp": "2026-03-01T06:09:30.662Z",
-  "updatedAt": "2026-03-24"
+  "updatedAt": "2026-03-24",
+  "hedgeV3": {
+    "facet": "0x484c2c3fD0bB094665A628a65f4f9908A4d7D00C",
+    "upgradeTx": "0x05a6abfd64b1222baccfb0188c7a1984c1ca5ae88442fd2eef07255b21e0b452",
+    "note": "Per-event payment token (USDC/USDT). 33 selectors replaced, 6 added. USDC whitelisted."
+  }
 }
