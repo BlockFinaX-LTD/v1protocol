@@ -27,10 +27,9 @@ const hre = require("hardhat");
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function getSelectors(contract) {
-  const signatures = Object.keys(contract.interface.functions);
-  return signatures
-    .filter((sig) => sig !== "init(bytes)")
-    .map((sig) => contract.interface.getFunction(sig).selector);
+  return contract.interface.fragments
+    .filter((f) => f.type === "function")
+    .map((f) => f.selector);
 }
 
 async function main() {
@@ -56,11 +55,11 @@ async function main() {
 
   const selectors = getSelectors(oracleFacet);
   console.log("\nFunction selectors to add:", selectors.length);
-  selectors.forEach((sel, i) => {
-    const fn = Object.keys(oracleFacet.interface.functions).find(
-      (sig) => oracleFacet.interface.getFunction(sig).selector === sel
+  selectors.forEach((sel) => {
+    const frag = oracleFacet.interface.fragments.find(
+      (f) => f.type === "function" && f.selector === sel
     );
-    console.log(`  ${sel}  ${fn}`);
+    console.log(`  ${sel}  ${frag ? frag.name : "unknown"}`);
   });
 
   const DiamondCut = await hre.ethers.getContractAt(
