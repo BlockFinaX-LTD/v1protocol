@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.20;
 
 import {IDiamondCut} from "../interfaces/IDiamondCut.sol";
 
@@ -137,13 +137,15 @@ library LibDiamond {
         require(_facetAddress != address(0), "LibDiamondCut: Can't remove function that doesn't exist");
         bytes4[] storage selectors = ds.facetFunctionSelectors[_facetAddress];
         uint256 selectorPosition;
-        for (uint256 i = 0; i < selectors.length; i++) {
+        // G001: cache length; G011: pre-increment.
+        uint256 selLen = selectors.length;
+        for (uint256 i = 0; i < selLen; ++i) {
             if (selectors[i] == _selector) {
                 selectorPosition = i;
                 break;
             }
         }
-        uint256 lastSelectorPosition = selectors.length - 1;
+        uint256 lastSelectorPosition = selLen - 1;
         if (selectorPosition != lastSelectorPosition) {
             selectors[selectorPosition] = selectors[lastSelectorPosition];
         }

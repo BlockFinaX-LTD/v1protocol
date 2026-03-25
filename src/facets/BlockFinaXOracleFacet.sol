@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.20;
 
 import {LibAppStorage} from "../libraries/LibAppStorage.sol";
 import {LibOracleStorage} from "../libraries/LibOracleStorage.sol";
@@ -119,6 +119,16 @@ contract BlockFinaXOracleFacet {
         _;
     }
 
+    // H003: shared reentrancy guard using the same AppStorage lock as HedgeFacet,
+    // so the lock is respected across all facets (Diamond cross-facet protection).
+    modifier nonReentrant() {
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        require(!s.hedgeReentrancyLock, "Reentrant call");
+        s.hedgeReentrancyLock = true;
+        _;
+        s.hedgeReentrancyLock = false;
+    }
+
     // ============================================================
     //                      ADMIN FUNCTIONS
     // ============================================================
@@ -161,9 +171,11 @@ contract BlockFinaXOracleFacet {
         require(os.isOracle[_oracle], "Not registered");
 
         os.isOracle[_oracle] = false;
-        for (uint256 i = 0; i < os.oracles.length; i++) {
+        // G001: cache length; G011: pre-increment.
+        uint256 len = os.oracles.length;
+        for (uint256 i = 0; i < len; ++i) {
             if (os.oracles[i] == _oracle) {
-                os.oracles[i] = os.oracles[os.oracles.length - 1];
+                os.oracles[i] = os.oracles[len - 1];
                 os.oracles.pop();
                 break;
             }
@@ -249,9 +261,13 @@ contract BlockFinaXOracleFacet {
      * @param _price   Current market price in 6-decimal units (same scale as strike price).
      *                 Must be > 0.
      */
+    // H003: nonReentrant guards against cross-function re-entrancy. submitRate calls
+    // _checkConsensus which calls _settleEvent — all within one atomic transaction.
+    // The shared AppStorage lock blocks any re-entrant call into HedgeFacet or this facet.
     function submitRate(uint256 _eventId, uint256 _price)
         external
         onlyAuthorisedOracle
+        nonReentrant
     {
         LibOracleStorage.OracleStorage storage os = LibOracleStorage.oracleStorage();
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
@@ -329,7 +345,8 @@ contract BlockFinaXOracleFacet {
         uint256[] memory validPrices = new uint256[](submitterCount);
         uint256 validCount = 0;
 
-        for (uint256 i = 0; i < submitterCount; i++) {
+        // G001: submitterCount already cached above; G011: pre-increment.
+        for (uint256 i = 0; i < submitterCount; ++i) {
             LibOracleStorage.Submission storage sub =
                 os.submissions[_eventId][submitters[i]];
             if (
@@ -337,7 +354,7 @@ contract BlockFinaXOracleFacet {
                 (block.timestamp - sub.timestamp) <= STALE_THRESHOLD
             ) {
                 validPrices[validCount] = sub.price;
-                validCount++;
+                ++validCount;
             }
         }
 
@@ -347,7 +364,8 @@ contract BlockFinaXOracleFacet {
         uint256 maxPrice = validPrices[0];
         uint256 sum = validPrices[0];
 
-        for (uint256 i = 1; i < validCount; i++) {
+        // G001: validCount is a stack variable (no storage read); G011: pre-increment.
+        for (uint256 i = 1; i < validCount; ++i) {
             if (validPrices[i] < minPrice) minPrice = validPrices[i];
             if (validPrices[i] > maxPrice) maxPrice = validPrices[i];
             sum += validPrices[i];
@@ -383,7 +401,9 @@ contract BlockFinaXOracleFacet {
         address[] storage submitters,
         LibOracleStorage.OracleStorage storage os
     ) internal {
-        for (uint256 i = 0; i < submitters.length; i++) {
+        // G001: cache length; G011: pre-increment.
+        uint256 count = submitters.length;
+        for (uint256 i = 0; i < count; ++i) {
             delete os.submissions[_eventId][submitters[i]];
         }
         delete os.submitters[_eventId];
@@ -422,7 +442,9 @@ contract BlockFinaXOracleFacet {
         evt.settledAt = block.timestamp;
 
         uint256[] storage positionIds = s.hedgeEventPositionIds[_eventId];
-        for (uint256 i = 0; i < positionIds.length; i++) {
+        // G001: cache array length; G011: pre-increment.
+        uint256 posCount = positionIds.length;
+        for (uint256 i = 0; i < posCount; ++i) {
             LibAppStorage.HedgePosition storage pos =
                 s.hedgePositions[positionIds[i]];
             if (pos.status != LibAppStorage.HedgePositionStatus.Active) continue;
@@ -551,7 +573,8 @@ contract BlockFinaXOracleFacet {
         timestamps = new uint256[](count);
         isStale = new bool[](count);
 
-        for (uint256 i = 0; i < count; i++) {
+        // G001: count already cached above; G011: pre-increment.
+        for (uint256 i = 0; i < count; ++i) {
             LibOracleStorage.Submission storage sub =
                 os.submissions[_eventId][submitters[i]];
             oracleAddresses[i] = submitters[i];

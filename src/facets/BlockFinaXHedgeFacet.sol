@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -254,10 +254,14 @@ contract BlockFinaXHedgeFacet {
         uint256 _lpProfitFeeRate,
         uint256 _creatorLoyaltyRate
     ) external onlyOwner {
-        require(_hedgerFeeRate <= PRECISION, "hedgerFeeRate > 100%");
-        require(_hedgerPayoutFeeRate <= PRECISION, "hedgerPayoutFeeRate > 100%");
-        require(_lpProfitFeeRate <= PRECISION, "lpProfitFeeRate > 100%");
-        require(_creatorLoyaltyRate <= PRECISION, "creatorLoyaltyRate > 100%");
+        // H002: cap individual rates to sensible maxima to prevent misconfiguration.
+        // Creation fee capped at $1,000 (1_000 * 1e6). Percentage rates capped at 10%
+        // (100_000 / 1e6). Creator loyalty capped at 50% of platform fees (500_000 / 1e6).
+        require(_eventCreationFee <= 1_000 * PRECISION, "Creation fee exceeds $1000 cap");
+        require(_hedgerFeeRate <= 100_000, "hedgerFeeRate exceeds 10% cap");
+        require(_hedgerPayoutFeeRate <= 100_000, "hedgerPayoutFeeRate exceeds 10% cap");
+        require(_lpProfitFeeRate <= 100_000, "lpProfitFeeRate exceeds 10% cap");
+        require(_creatorLoyaltyRate <= 500_000, "creatorLoyaltyRate exceeds 50% cap");
 
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         s.hedgeFeeConfig = LibAppStorage.HedgeFeeConfig({
@@ -494,6 +498,8 @@ contract BlockFinaXHedgeFacet {
      * @param _amount  Amount to withdraw (6 decimals).
      */
     function withdrawPlatformFeesByToken(address _token, uint256 _amount) external onlyOwner nonReentrant {
+        // L007: validate token address before any storage reads.
+        require(_token != address(0), "Zero address");
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         require(_amount > 0, "Amount must be > 0");
         require(_amount <= s.platformFeesByToken[_token], "Exceeds available fees for token");
@@ -949,7 +955,9 @@ contract BlockFinaXHedgeFacet {
      * @param _eventId         The event to settle.
      * @param _settlementPrice The final FX rate at settlement time (6 decimals).
      */
-    function settleEvent(uint256 _eventId, uint256 _settlementPrice) external onlyOracleAdmin {
+    // H003: nonReentrant added for defence-in-depth even though settleEvent has no
+    // token transfers. Prevents cross-function reentrancy via the shared AppStorage lock.
+    function settleEvent(uint256 _eventId, uint256 _settlementPrice) external onlyOracleAdmin nonReentrant {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
 
@@ -967,7 +975,9 @@ contract BlockFinaXHedgeFacet {
         evt.settledAt = block.timestamp;
 
         uint256[] storage positionIds = s.hedgeEventPositionIds[_eventId];
-        for (uint256 i = 0; i < positionIds.length; i++) {
+        // G001: cache array length to avoid repeated storage reads in the loop.
+        uint256 positionCount = positionIds.length;
+        for (uint256 i = 0; i < positionCount; ++i) {  // G011: pre-increment
             LibAppStorage.HedgePosition storage pos = s.hedgePositions[positionIds[i]];
             if (pos.status != LibAppStorage.HedgePositionStatus.Active) continue;
 
@@ -1012,6 +1022,8 @@ contract BlockFinaXHedgeFacet {
         uint256 grossPayout = pos.payoutAmount;
         uint256 payoutFee = (grossPayout * s.hedgeFeeConfig.hedgerPayoutFeeRate) / PRECISION;
         uint256 netPayout = grossPayout - payoutFee;
+        // L003: guard against a zero-value transfer (possible only if hedgerPayoutFeeRate = 100%).
+        require(netPayout > 0, "Net payout rounds to zero");
 
         uint256 creatorReward = (payoutFee * s.hedgeFeeConfig.creatorLoyaltyRate) / PRECISION;
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[pos.eventId];
@@ -1061,6 +1073,8 @@ contract BlockFinaXHedgeFacet {
 
         uint256 lpFee = (claimable * s.hedgeFeeConfig.lpProfitFeeRate) / PRECISION;
         uint256 netAmount = claimable - lpFee;
+        // L003: guard against zero-value transfer (possible only if lpProfitFeeRate = 100%).
+        require(netAmount > 0, "Net premium amount rounds to zero");
 
         uint256 creatorReward = (lpFee * s.hedgeFeeConfig.creatorLoyaltyRate) / PRECISION;
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[dep.eventId];
@@ -1443,7 +1457,9 @@ contract BlockFinaXHedgeFacet {
 
         if (totalShares == 0) return;
 
-        for (uint256 i = 0; i < depositIds.length; i++) {
+        // G001: cache array length; G011: use pre-increment.
+        uint256 len = depositIds.length;
+        for (uint256 i = 0; i < len; ++i) {
             LibAppStorage.HedgeLpDeposit storage dep = s.hedgeLpDeposits[depositIds[i]];
             if (dep.withdrawn) continue;
 
@@ -1468,7 +1484,9 @@ contract BlockFinaXHedgeFacet {
         uint256[] storage depositIds = s.hedgeEventDepositIds[_eventId];
         uint256 total = 0;
 
-        for (uint256 i = 0; i < depositIds.length; i++) {
+        // G001: cache array length; G011: use pre-increment.
+        uint256 len = depositIds.length;
+        for (uint256 i = 0; i < len; ++i) {
             LibAppStorage.HedgeLpDeposit storage dep = s.hedgeLpDeposits[depositIds[i]];
             if (!dep.withdrawn) {
                 total += dep.shares;
