@@ -31,15 +31,21 @@ library LibAppStorage {
      * @notice Lifecycle status of a hedge event.
      * @param Open     Event is active: deposits, purchases, and settlement are possible.
      * @param Settled  Oracle has posted the final rate; positions are resolved.
-     * @param Expired  Reserved for future use (events currently transition Open → Settled).
+     * @param Expired  Reserved for future use; events currently transition Open → Settled only.
+     *                 Never assigned by current code. withdrawCapital() permits this status
+     *                 to remain forward-compatible should expiry-without-settlement be added.
      */
     enum HedgeEventStatus { Open, Settled, Expired }
 
     /**
      * @notice Lifecycle status of a hedger position.
      * @param Active      Purchased and awaiting settlement.
-     * @param SettledWin  Legacy status (use Claimable for new settlements).
-     * @param SettledLoss Legacy status (use Expired for new settlements).
+     * @param SettledWin  Legacy status — never written by current code. Retained in the enum
+     *                    to preserve on-chain ABI compatibility; settleEvent() sets Claimable
+     *                    instead. claimPayout() still accepts this value for backward compat.
+     * @param SettledLoss Legacy status — never written by current code. Retained in the enum
+     *                    to preserve on-chain ABI compatibility; settleEvent() sets Expired
+     *                    instead.
      * @param Claimed     Payout has been successfully claimed by the hedger.
      * @param Claimable   Strike was touched; hedger may call claimPayout().
      * @param Expired     Strike was not touched; payoutAmount = 0, position is closed.

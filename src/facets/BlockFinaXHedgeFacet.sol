@@ -329,10 +329,13 @@ contract BlockFinaXHedgeFacet {
     }
 
     /**
-     * @notice Pause all user-facing state-changing functions.
-     * @dev Blocks createEvent, deposit, buyProtection, and all claim/withdraw functions.
-     *      Settlement via settleEvent() and oracle operations remain unaffected so that
-     *      in-flight events can still be resolved during an incident.
+     * @notice Pause new protocol activity.
+     * @dev Blocks createEvent(), deposit(), buyProtection(), and setPoolSettings().
+     *      Claim and withdrawal functions (claimPayout, claimPremiums, withdrawCapital,
+     *      withdrawCreatorEarnings) remain available so users can retrieve their funds
+     *      during an incident — locking user funds during a pause would be harmful.
+     *      Settlement via settleEvent() and oracle operations are also unaffected so that
+     *      in-flight events can still be resolved.
      *      Reverts if already paused.
      */
     function pause() external onlyOwner {
@@ -365,6 +368,14 @@ contract BlockFinaXHedgeFacet {
         require(_amount <= s.hedgePlatformFeesCollected, "Exceeds collected fees");
 
         s.hedgePlatformFeesCollected -= _amount;
+        // Keep per-token counter in sync. Pre-v3 events may not have credited
+        // platformFeesByToken, so floor at zero rather than allowing underflow.
+        if (_amount <= s.platformFeesByToken[s.usdcToken]) {
+            s.platformFeesByToken[s.usdcToken] -= _amount;
+        } else {
+            s.platformFeesByToken[s.usdcToken] = 0;
+        }
+
         IERC20(s.usdcToken).safeTransfer(msg.sender, _amount);
 
         emit PlatformFeesWithdrawn(msg.sender, _amount);
@@ -407,9 +418,15 @@ contract BlockFinaXHedgeFacet {
         // Mark as reconciled — further calls to this function are no-ops.
         evt.totalMaxPayout = claimed;
 
+        address eventToken = _getEventToken(s, evt);
+
         // Sweep residual into platform fees for withdrawal by the owner.
-        s.hedgePlatformFeesCollected += residual;
-        s.platformFeesByToken[_getEventToken(s, evt)] += residual;
+        // Only credit the USDC-specific legacy counter for USDC events; non-USDC event
+        // residuals (e.g. USDT) must be withdrawn via withdrawPlatformFeesByToken().
+        if (eventToken == s.usdcToken) {
+            s.hedgePlatformFeesCollected += residual;
+        }
+        s.platformFeesByToken[eventToken] += residual;
 
         emit ExpiredPayoutsRecovered(_eventId, residual);
     }
@@ -505,9 +522,14 @@ contract BlockFinaXHedgeFacet {
         require(_amount <= s.platformFeesByToken[_token], "Exceeds available fees for token");
 
         s.platformFeesByToken[_token] -= _amount;
-        // Keep the legacy aggregate counter in sync when withdrawing USDC fees this way.
-        if (_token == s.usdcToken && _amount <= s.hedgePlatformFeesCollected) {
-            s.hedgePlatformFeesCollected -= _amount;
+        // Keep the legacy USDC aggregate counter in sync. Pre-v3 events may not have
+        // credited hedgePlatformFeesCollected for this token, so floor at zero.
+        if (_token == s.usdcToken) {
+            if (_amount <= s.hedgePlatformFeesCollected) {
+                s.hedgePlatformFeesCollected -= _amount;
+            } else {
+                s.hedgePlatformFeesCollected = 0;
+            }
         }
 
         IERC20(_token).safeTransfer(msg.sender, _amount);
@@ -637,7 +659,8 @@ contract BlockFinaXHedgeFacet {
         s.platformFeesByToken[token] += creationFee;
 
         uint256 eventId = ++s.hedgeEventCounter;
-        s.totalHedgeEvents++;
+        // totalHedgeEvents is kept in storage for layout compatibility but always equals
+        // hedgeEventCounter; getTotalHedgeEvents() reads hedgeEventCounter directly.
 
         _initHedgeEvent(s, eventId, _params, token);
 
@@ -743,7 +766,7 @@ contract BlockFinaXHedgeFacet {
         uint256 _eventId,
         bool _poolOpen,
         bool _allowExternalLp
-    ) external {
+    ) external whenNotPaused {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
 
@@ -1100,7 +1123,12 @@ contract BlockFinaXHedgeFacet {
      * @notice Withdraw deposited capital after an event has been settled or expired.
      * @dev Capital is locked while the event is Open to back active hedger positions.
      *      After settlement, capital is returned net of the LP's proportional share of
-     *      actual payouts owed to winning hedgers (only if triggered = true).
+     *      totalMaxPayout (the full sum of all predetermined payouts, including those still
+     *      reserved for winning hedgers who have not yet called claimPayout()).
+     *      Using totalMaxPayout rather than totalPayoutClaimed keeps the contract solvent
+     *      for all remaining claimants — withdrawing unclaimed payout shares would leave
+     *      the contract unable to pay winning hedgers.  Any reserved-but-unclaimed payouts
+     *      after the 90-day grace period are swept into platform fees via recoverExpiredPayouts().
      *
      *      Payout deduction formula (single-step to avoid double-division precision loss):
      *        lpPayoutShare = totalMaxPayout * dep.amount / totalLiquidity
@@ -1399,7 +1427,8 @@ contract BlockFinaXHedgeFacet {
      * @return Cumulative event count (includes settled and expired events).
      */
     function getTotalHedgeEvents() external view returns (uint256) {
-        return LibAppStorage.appStorage().totalHedgeEvents;
+        // hedgeEventCounter == totalHedgeEvents at all times; reading the single source.
+        return LibAppStorage.appStorage().hedgeEventCounter;
     }
 
     /**

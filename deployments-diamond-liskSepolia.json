@@ -6,8 +6,8 @@
   "facets": {
     "blockFinaXDiamondCut": "0x289eE379b00e3B20c4BaD64a525B0b0D123a7d0c",
     "blockFinaXDiamondLoupe": "0xB13D148ccd95e045AB6b501ab8961c61b1c56d9d",
-    "blockFinaXHedge": "0x484c2c3fD0bB094665A628a65f4f9908A4d7D00C",
-    "blockFinaXOracle": "0x613b73eE647888e3947df488F0E633EB7DAE1F21",
+    "blockFinaXHedge": "0xdc7dbA1ed596461cec6276AA16DeADB51dA41CB8",
+    "blockFinaXOracle": "0x661f2589f96382C72b784e8206FfeE50300c0eA2",
     "blockFinaXOwnership": "0x024e16661fA238Cd6B0d71EaB1E955c5860A3dA4"
   },
   "config": {
@@ -72,12 +72,30 @@
   },
   "deployer": "0xef5Bed7c221c85A2c88e3c0223ee45482d6F037d",
   "timestamp": "2026-03-01T06:09:30.662Z",
-  "updatedAt": "2026-03-24",
+  "updatedAt": "2026-03-25",
   "hedgeV3": {
     "facet": "0x484c2c3fD0bB094665A628a65f4f9908A4d7D00C",
     "upgradeTx": "0x05a6abfd64b1222baccfb0188c7a1984c1ca5ae88442fd2eef07255b21e0b452",
     "note": "Per-event payment token (USDC/USDT). 33 selectors replaced, 6 added. USDC + USDT whitelisted.",
     "usdtToken": "0x05D032ac25d322df992303dCa074EE7392C117b9",
     "usdtWhitelistTx": "0xe61ca013f338d3325ac932ae8ca411417e939b1f0b34812a9f3aa31df4bcd814"
+  },
+  "auditorFixesV1": {
+    "hedgeFacet": "0xdc7dbA1ed596461cec6276AA16DeADB51dA41CB8",
+    "hedgeDiamondCutTx": "0xadea1535a1cacb1c0a11efa99e1c0e4f72880fdb8e09e3eecf8de4d4b927d383",
+    "oracleFacet": "0x661f2589f96382C72b784e8206FfeE50300c0eA2",
+    "oracleDiamondCutTx": "0x7ff7662449bde6c687b40a5e2060b7cab015321a062c0f211ad3d24b5eabec38",
+    "fixes": [
+      "pause() NatSpec corrected: blocks createEvent/deposit/buyProtection/setPoolSettings only; claims/withdrawals remain available",
+      "setPoolSettings: added whenNotPaused modifier (consistent with pause semantics)",
+      "withdrawPlatformFees: now syncs platformFeesByToken[usdcToken] to prevent counter divergence",
+      "withdrawPlatformFeesByToken (USDC): removed fragile conditional; always syncs hedgePlatformFeesCollected",
+      "recoverExpiredPayouts: hedgePlatformFeesCollected only incremented for USDC events; USDT residuals go to platformFeesByToken only",
+      "getTotalHedgeEvents: reads hedgeEventCounter directly (totalHedgeEvents counter removed from createEvent)",
+      "withdrawCapital NatSpec: explains totalMaxPayout vs totalPayoutClaimed design rationale",
+      "LibAppStorage enums: HedgeEventStatus.Expired and HedgePositionStatus.SettledWin/SettledLoss annotated as reserved/legacy",
+      "OracleFacet _checkConsensus: two-pass validPrices allocation (correct array size, no trailing zeros)",
+      "OracleFacet _checkConsensus: explicit require(minPrice > 0) guard at division site"
+    ]
   }
 }

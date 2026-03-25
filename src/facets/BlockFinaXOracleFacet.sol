@@ -342,29 +342,41 @@ contract BlockFinaXOracleFacet {
 
         if (submitterCount < required) return;
 
-        uint256[] memory validPrices = new uint256[](submitterCount);
+        // Pass 1: count non-stale submissions before allocating memory.
+        // This avoids over-allocating a `submitterCount`-length array when some entries are stale,
+        // which would leave trailing zero slots that could mislead readers of the array.
         uint256 validCount = 0;
-
-        // G001: submitterCount already cached above; G011: pre-increment.
+        // G001: submitterCount cached above; G011: pre-increment.
         for (uint256 i = 0; i < submitterCount; ++i) {
             LibOracleStorage.Submission storage sub =
                 os.submissions[_eventId][submitters[i]];
-            if (
-                sub.exists &&
-                (block.timestamp - sub.timestamp) <= STALE_THRESHOLD
-            ) {
-                validPrices[validCount] = sub.price;
+            if (sub.exists && (block.timestamp - sub.timestamp) <= STALE_THRESHOLD) {
                 ++validCount;
             }
         }
 
         if (validCount < required) return;
 
+        // Pass 2: collect exactly `validCount` valid prices into a correctly-sized array.
+        uint256[] memory validPrices = new uint256[](validCount);
+        uint256 idx = 0;
+        for (uint256 i = 0; i < submitterCount; ++i) {
+            LibOracleStorage.Submission storage sub =
+                os.submissions[_eventId][submitters[i]];
+            if (sub.exists && (block.timestamp - sub.timestamp) <= STALE_THRESHOLD) {
+                validPrices[idx] = sub.price;
+                ++idx;
+            }
+        }
+
         uint256 minPrice = validPrices[0];
         uint256 maxPrice = validPrices[0];
         uint256 sum = validPrices[0];
+        // Defensive guard: submitRate enforces _price > 0, so minPrice can never be zero,
+        // but we assert explicitly to make the invariant clear to auditors.
+        require(minPrice > 0, "Zero price in valid submission set");
 
-        // G001: validCount is a stack variable (no storage read); G011: pre-increment.
+        // G001: validCount is a stack variable; G011: pre-increment.
         for (uint256 i = 1; i < validCount; ++i) {
             if (validPrices[i] < minPrice) minPrice = validPrices[i];
             if (validPrices[i] > maxPrice) maxPrice = validPrices[i];
