@@ -1,59 +1,47 @@
 /**
- * Transfers Diamond ownership to a Gnosis Safe (two-step via Ownable2Step).
+ * transfer-ownership-to-safe.js
  *
- * Step 1 (this script): current owner calls transferOwnership(safeAddress)
- * Step 2: Safe executes acceptOwnership() via safe-create-tx.js
+ * Step 1 of 2: Propose ownership transfer from the deployer wallet to the Gnosis Safe.
+ * The Safe must call acceptOwnership() to complete the transfer.
  *
- * Usage:
- *   DIAMOND_ADDRESS=0x... SAFE_ADDRESS=0x... \
- *     npx hardhat run scripts/transfer-ownership-to-safe.js --network liskSepolia
+ * Diamond:     0x3eDfA00a1E3C158A591097de2FA1756aCD66860D
+ * Current owner (deployer): 0xef5Bed7c221c85A2c88e3c0223ee45482d6F037d
+ * Proposed new owner (Safe): 0x60719b73880710a2A471C21140515A6Cc8305fDB
  */
 
-const hre = require("hardhat");
+const { ethers } = require("hardhat");
 
-const DIAMOND_ABI = [
-  "function pendingOwner() view returns (address)",
-  "function transferOwnership(address _newOwner)",
-];
+const DIAMOND    = "0x3eDfA00a1E3C158A591097de2FA1756aCD66860D";
+const GNOSIS_SAFE = "0x60719b73880710a2A471C21140515A6Cc8305fDB";
 
 async function main() {
-  const [deployer] = await hre.ethers.getSigners();
+  const [deployer] = await ethers.getSigners();
+  console.log("\n=== Ownership Transfer — Step 1 of 2 ===");
+  console.log("Diamond:       ", DIAMOND);
+  console.log("Current owner: ", deployer.address);
+  console.log("Proposed Safe: ", GNOSIS_SAFE);
 
-  const DIAMOND_ADDRESS = process.env.DIAMOND_ADDRESS;
-  const SAFE_ADDRESS    = process.env.SAFE_ADDRESS;
+  const hedge = await ethers.getContractAt("BlockFinaXHedgeFacet", DIAMOND);
 
-  if (!DIAMOND_ADDRESS || !SAFE_ADDRESS) {
-    throw new Error("Set DIAMOND_ADDRESS and SAFE_ADDRESS env vars");
-  }
+  console.log("\nSending transferOwnership()...");
+  const tx = await hedge.transferOwnership(GNOSIS_SAFE);
+  await tx.wait();
+  console.log("tx:", tx.hash);
 
-  const diamond = new hre.ethers.Contract(DIAMOND_ADDRESS, DIAMOND_ABI, deployer);
+  // Confirm pending owner
+  const pending = await hedge.pendingOwner();
+  console.log("\nPending owner (confirmed on-chain):", pending);
 
-  const pendingOwner = await diamond.pendingOwner();
-
-  console.log("Diamond:        ", DIAMOND_ADDRESS);
-  console.log("Deployer:       ", deployer.address);
-  console.log("Pending owner:  ", pendingOwner);
-  console.log("Safe address:   ", SAFE_ADDRESS);
-
-  if (pendingOwner.toLowerCase() === SAFE_ADDRESS.toLowerCase()) {
-    console.log("\nTransfer already initiated — Safe just needs to call acceptOwnership()");
-    console.log("Run safe-create-tx.js with ACTION=acceptOwnership");
-    return;
-  }
-
-  console.log("\nInitiating ownership transfer...");
-  const tx = await diamond.transferOwnership(SAFE_ADDRESS);
-  const receipt = await tx.wait();
-  console.log("Tx hash:        ", receipt.hash);
-
-  const newPending = await diamond.pendingOwner();
-  console.log("Pending owner now:", newPending);
-  console.log("\n✅ Step 1 done — Safe must now call acceptOwnership() to complete the transfer.");
-  console.log("   DIAMOND_ADDRESS=" + DIAMOND_ADDRESS + " SAFE_ADDRESS=" + SAFE_ADDRESS + " ACTION=acceptOwnership");
-  console.log("   SIGNER_A_KEY=0x... SIGNER_B_KEY=0x... npx hardhat run scripts/safe-create-tx.js --network liskSepolia");
+  console.log("\n" + "=".repeat(55));
+  console.log(" STEP 1 COMPLETE");
+  console.log("=".repeat(55));
+  console.log("\nNow go to your Gnosis Safe and execute:");
+  console.log("  Contract: ", DIAMOND);
+  console.log("  Function:  acceptOwnership()");
+  console.log("  ABI:       function acceptOwnership() external");
+  console.log("\nSafe app: https://app.safe.global/lisk:0x60719b73880710a2A471C21140515A6Cc8305fDB");
+  console.log("\nThe deployer remains owner until the Safe calls acceptOwnership().");
+  console.log("=".repeat(55));
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exitCode = 1;
-});
+main().catch(e => { console.error("Failed:", e.message); process.exit(1); });
