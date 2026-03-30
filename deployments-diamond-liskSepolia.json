@@ -72,7 +72,7 @@
   },
   "deployer": "0xef5Bed7c221c85A2c88e3c0223ee45482d6F037d",
   "timestamp": "2026-03-01T06:09:30.662Z",
-  "updatedAt": "2026-03-25",
+  "updatedAt": "2026-03-30T11:12:27Z",
   "hedgeV3": {
     "facet": "0x484c2c3fD0bB094665A628a65f4f9908A4d7D00C",
     "upgradeTx": "0x05a6abfd64b1222baccfb0188c7a1984c1ca5ae88442fd2eef07255b21e0b452",
@@ -96,6 +96,17 @@
       "LibAppStorage enums: HedgeEventStatus.Expired and HedgePositionStatus.SettledWin/SettledLoss annotated as reserved/legacy",
       "OracleFacet _checkConsensus: two-pass validPrices allocation (correct array size, no trailing zeros)",
       "OracleFacet _checkConsensus: explicit require(minPrice > 0) guard at division site"
+    ]
+  },
+  "hedgeV5": {
+    "facet": "0x733cdf79C00dEbA92d46d94E569e8A8570133E1c",
+    "upgradeTx": "0xfb63d8cfa27195e5403af860f4facb1db5486821fda3e84feadc9645deab48f7",
+    "note": "v5 audit fixes: fee snapshot, poolOpen guard, settleEvent guard, MasterChef O(1) premium accumulator. 40 selectors replaced.",
+    "auditFixes": [
+      "fee-snapshot-createEvent",
+      "external-lp-poolOpen",
+      "settleEvent-no-positions-guard",
+      "masterchef-premium-accumulator"
     ]
   }
 }
