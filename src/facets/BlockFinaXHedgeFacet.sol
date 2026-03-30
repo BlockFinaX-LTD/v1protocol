@@ -168,6 +168,10 @@ contract BlockFinaXHedgeFacet {
     /// @notice Emitted when the oracle admin address is updated.
     event OracleAdminSet(address indexed admin);
 
+    /// @notice Emitted when the single-key settlement path is permanently disabled.
+    ///         After this event, all settlement must go through OracleFacet.
+    event OracleV2Activated();
+
     /// @notice Emitted when the protocol is paused.
     event Paused(address indexed by);
 
@@ -304,6 +308,25 @@ contract BlockFinaXHedgeFacet {
     }
 
     /**
+     * @notice Permanently disable the single-key settleEvent() path and enforce
+     *         multi-oracle consensus (OracleFacet) as the only settlement route.
+     *
+     * @dev This is a one-way flag. Once set it cannot be reversed, even by the owner.
+     *      Call only after OracleFacet oracles are fully registered, tested, and confirmed
+     *      operational. Calling prematurely will permanently lock manual settlement.
+     *
+     *      After activation:
+     *        - settleEvent() in this facet reverts with "Single-key settlement disabled".
+     *        - All settlement must go through OracleFacet.submitRate() → consensus path.
+     */
+    function activateOracleV2() external onlyOwner {
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        require(!s.oracleV2Active, "OracleV2 already active");
+        s.oracleV2Active = true;
+        emit OracleV2Activated();
+    }
+
+    /**
      * @notice Propose a new Diamond owner. The proposed address must call acceptOwnership().
      * @dev Two-step pattern prevents permanent lockout from a typo in the new owner address.
      *      The current owner retains all privileges until acceptOwnership() is called.
@@ -414,15 +437,31 @@ contract BlockFinaXHedgeFacet {
             "Grace period not elapsed (90 days from settlement)"
         );
 
-        uint256 reserved = evt.totalMaxPayout;
-        uint256 claimed  = evt.totalPayoutClaimed;
+        // Walk all positions and expire any that are still Claimable.
+        // This prevents late-claiming hedgers from drawing funds that have already been
+        // swept into platform fees, which could drain unrelated contract balances.
+        uint256[] storage positionIds = s.hedgeEventPositionIds[_eventId];
+        uint256 posCount = positionIds.length;
+        uint256 residual = 0;
+        for (uint256 i = 0; i < posCount; ++i) {
+            LibAppStorage.HedgePosition storage pos = s.hedgePositions[positionIds[i]];
+            if (
+                pos.status == LibAppStorage.HedgePositionStatus.Claimable && !pos.claimed
+            ) {
+                residual += pos.payoutAmount;
+                pos.payoutAmount = 0;
+                pos.status = LibAppStorage.HedgePositionStatus.Expired;
+            }
+        }
 
-        require(reserved > claimed, "No unclaimed payouts to recover");
+        require(residual > 0, "No unclaimed payouts to recover");
 
-        uint256 residual = reserved - claimed;
-
-        // Mark as reconciled — further calls to this function are no-ops.
-        evt.totalMaxPayout = claimed;
+        // Reconcile the event-level reserve.
+        if (evt.totalMaxPayout >= residual) {
+            evt.totalMaxPayout -= residual;
+        } else {
+            evt.totalMaxPayout = 0;
+        }
 
         address eventToken = _getEventToken(s, evt);
 
@@ -1054,6 +1093,9 @@ contract BlockFinaXHedgeFacet {
         require(evt.id > 0, "Event not found");
         require(evt.status == LibAppStorage.HedgeEventStatus.Open, "Already settled");
         require(_settlementPrice > 0, "Invalid price");
+        // Once activateOracleV2() has been called, all settlement must go through OracleFacet.
+        // This permanently enforces multi-oracle consensus and disables the single-key path.
+        require(!s.oracleV2Active, "Single-key settlement disabled: use OracleFacet");
         // Fix 3 — Fallback oracle guard: prevent settling an event that nobody has joined.
         // An event with zero hedger positions has nothing to resolve and settling it early
         // would allow front-running the pool (settle before any user can participate).
@@ -1135,8 +1177,18 @@ contract BlockFinaXHedgeFacet {
         address token = _getEventToken(s, evt);
         s.platformFeesByToken[token] += netPayoutFee;
 
-        // Track total tokens actually paid out for this event (used by recoverExpiredPayouts).
+        // Track total tokens actually paid out for this event.
         evt.totalPayoutClaimed += grossPayout;
+
+        // Reduce the reserved payout pool so that LPs who call withdrawCapital() after some
+        // hedgers have already claimed are not penalised for payouts that have already left
+        // the contract. Without this, totalMaxPayout stays at its peak value forever and
+        // LPs subsidise unclaimed amounts even after the hedger has been paid.
+        if (evt.totalMaxPayout >= grossPayout) {
+            evt.totalMaxPayout -= grossPayout;
+        } else {
+            evt.totalMaxPayout = 0; // underflow guard; should not occur in correct operation
+        }
 
         pos.claimed = true;
         pos.status = LibAppStorage.HedgePositionStatus.Claimed;

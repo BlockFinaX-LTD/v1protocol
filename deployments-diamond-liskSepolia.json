@@ -72,7 +72,7 @@
   },
   "deployer": "0xef5Bed7c221c85A2c88e3c0223ee45482d6F037d",
   "timestamp": "2026-03-01T06:09:30.662Z",
-  "updatedAt": "2026-03-30T11:12:27Z",
+  "updatedAt": "2026-03-30T11:25:15Z",
   "hedgeV3": {
     "facet": "0x484c2c3fD0bB094665A628a65f4f9908A4d7D00C",
     "upgradeTx": "0x05a6abfd64b1222baccfb0188c7a1984c1ca5ae88442fd2eef07255b21e0b452",
@@ -107,6 +107,24 @@
       "external-lp-poolOpen",
       "settleEvent-no-positions-guard",
       "masterchef-premium-accumulator"
+    ]
+  },
+  "hedgeV6": {
+    "facet": "0x5d1988e4FE57CdA1b056dC0f8bd9B15c2110B47B",
+    "upgradeTx": "0x1039288395451b3aff99e6b06738304a3048ed8109f08abd01652e1c6f4685d6",
+    "note": "v6 audit fixes: oracleV2Active flag + activateOracleV2(), totalMaxPayout reduced on each claimPayout(), recoverExpiredPayouts marks individual positions Expired. 40 replaced + 1 added (activateOracleV2).",
+    "auditFixes": [
+      "oracle-v2-active-flag",
+      "total-max-payout-reduces-on-claim",
+      "recover-expired-payouts-marks-positions"
+    ]
+  },
+  "oracleV3": {
+    "facet": "0x322aff2Dd3Cad2425604e317B38008605Fbd46D0",
+    "upgradeTx": "0x9aafdae1cad07e0a9a61aa3b3535b5c1820be93517e233e002499ebe8ca9fa03",
+    "note": "v3 audit fix: setRequiredSigners minimum raised from 1 to 2. 12 selectors replaced.",
+    "auditFixes": [
+      "required-signers-minimum-2"
     ]
   }
 }

@@ -293,6 +293,11 @@ library LibAppStorage {
         ///      Settlement via settleEvent() remains available while paused.
         bool paused;
 
+        /// @dev One-way flag: once set true by activateOracleV2(), the single-key settleEvent()
+        ///      path in HedgeFacet is permanently disabled and all settlement must go through
+        ///      the multi-oracle consensus path in OracleFacet. Cannot be unset.
+        bool oracleV2Active;
+
         /// @dev Confirms that initializeHedgeFees() has been called at least once.
         ///      createEvent() reverts until this is true.
         bool feesInitialized;

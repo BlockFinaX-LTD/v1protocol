@@ -193,7 +193,7 @@ contract BlockFinaXOracleFacet {
      */
     function setRequiredSigners(uint256 _required) external onlyOwner {
         LibOracleStorage.OracleStorage storage os = LibOracleStorage.oracleStorage();
-        require(_required >= 1, "Minimum 1 signer");
+        require(_required >= 2, "Minimum 2 signers required");
         require(_required <= os.oracles.length, "Exceeds oracle count");
         os.requiredSigners = _required;
         emit OracleConfigUpdated(os.requiredSigners, os.toleranceBps);
