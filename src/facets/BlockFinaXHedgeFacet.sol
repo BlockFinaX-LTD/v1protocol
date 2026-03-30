@@ -425,7 +425,7 @@ contract BlockFinaXHedgeFacet {
      *
      * @param _eventId The settled event whose unclaimed payouts should be recovered.
      */
-    function recoverExpiredPayouts(uint256 _eventId) external onlyOwner nonReentrant {
+    function recoverExpiredPayouts(uint256 _eventId) external nonReentrant {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
 

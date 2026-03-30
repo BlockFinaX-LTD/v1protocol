@@ -1,0 +1,9 @@
+{
+  "timelockCutFacetV2": "0x56e10850a90751c80c500C6aF10da36D95A85D86",
+  "hedgeFacetV7": "0x3af3275eC30Ad5F3c1DBd47EfF69c6dF4196DEd5",
+  "deployedAt": "2026-03-30T21:17:07.773Z",
+  "changes": [
+    "TimelockCutFacet: added MAX_PROPOSAL_AGE (30d expiry), added getAllCutIds()",
+    "HedgeFacet: removed onlyOwner from recoverExpiredPayouts"
+  ]
+}

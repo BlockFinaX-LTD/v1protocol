@@ -19,6 +19,7 @@ import {LibDiamond} from "../libraries/LibDiamond.sol";
  */
 contract BlockFinaXTimelockCutFacet {
     uint256 public constant TIMELOCK_DELAY = 48 hours;
+    uint256 public constant MAX_PROPOSAL_AGE = 30 days;
 
     bytes32 private constant STORAGE_SLOT =
         keccak256("blockfinax.timelock.cut.storage.v1");
@@ -100,6 +101,7 @@ contract BlockFinaXTimelockCutFacet {
         require(!p.executed,            "Already executed");
         require(!p.cancelled,           "Proposal cancelled");
         require(block.timestamp >= p.eta, "Timelock delay not elapsed");
+        require(block.timestamp <= p.eta + MAX_PROPOSAL_AGE, "Proposal expired: re-propose");
 
         p.executed = true;
 
@@ -133,9 +135,17 @@ contract BlockFinaXTimelockCutFacet {
     }
 
     /**
-     * @notice Return all proposal IDs ever created.
+     * @notice Return all proposal IDs ever created (includes executed and cancelled).
+     * @dev Kept for backwards compatibility. Prefer getAllCutIds().
      */
     function getPendingCutIds() external view returns (bytes32[] memory) {
+        return _store().ids;
+    }
+
+    /**
+     * @notice Return all proposal IDs ever created (includes executed and cancelled).
+     */
+    function getAllCutIds() external view returns (bytes32[] memory) {
         return _store().ids;
     }
 
