@@ -1,42 +1,24 @@
-const hre = require("hardhat");
+const { ethers } = require("hardhat");
+const fs = require("fs");
 
 async function main() {
-  const [deployer] = await hre.ethers.getSigners();
-  const DIAMOND_ADDRESS = process.env.DIAMOND_ADDRESS;
-  if (!DIAMOND_ADDRESS) throw new Error("Set DIAMOND_ADDRESS env var");
-
+  const [deployer] = await ethers.getSigners();
   console.log("Deployer:", deployer.address);
-  console.log("Diamond: ", DIAMOND_ADDRESS);
+  const bal = await deployer.provider.getBalance(deployer.address);
+  console.log("Balance:", ethers.formatEther(bal), "ETH\n");
 
-  const OwnershipFacet = await hre.ethers.getContractFactory("BlockFinaXOwnershipFacet");
-  const facet = await OwnershipFacet.deploy();
+  console.log("Deploying BlockFinaXOwnershipFacet...");
+  const Factory = await ethers.getContractFactory("BlockFinaXOwnershipFacet");
+  const facet   = await Factory.deploy();
   await facet.waitForDeployment();
-  const facetAddress = await facet.getAddress();
-  console.log("OwnershipFacet deployed:", facetAddress);
+  const addr = await facet.getAddress();
+  console.log("OwnershipFacet deployed at:", addr);
 
-  const selectors = facet.interface.fragments
-    .filter((f) => f.type === "function")
-    .map((f) => f.selector);
-
-  selectors.forEach((sel) => {
-    const frag = facet.interface.fragments.find((f) => f.type === "function" && f.selector === sel);
-    console.log(" ", sel, frag?.name);
-  });
-
-  const DiamondCut = await hre.ethers.getContractAt("BlockFinaXDiamondCutFacet", DIAMOND_ADDRESS);
-  const tx = await DiamondCut.diamondCut(
-    [{ facetAddress, action: 0, functionSelectors: selectors }],
-    hre.ethers.ZeroAddress,
-    "0x"
+  fs.writeFileSync(
+    "deployments-ownership-facet-liskMainnet.json",
+    JSON.stringify({ ownershipFacet: addr, deployedAt: new Date().toISOString() }, null, 2)
   );
-  const receipt = await tx.wait();
-  console.log("diamondCut tx:", receipt.hash);
-  console.log("OwnershipFacet is live on the Diamond");
-  console.log("\nNext:");
-  console.log("  DIAMOND_ADDRESS=" + DIAMOND_ADDRESS + " SAFE_ADDRESS=<safe> npx hardhat run scripts/transfer-ownership-to-safe.js --network liskSepolia");
+  console.log("Saved.");
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exitCode = 1;
-});
+main().catch(e => { console.error(e.message); process.exit(1); });
