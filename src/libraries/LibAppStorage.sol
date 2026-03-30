@@ -114,6 +114,29 @@ library LibAppStorage {
         /// @dev Stablecoin used for all payments in this event (USDC, USDT, etc.). Added in v3.
         ///      Zero address falls back to s.usdcToken so pre-v3 events continue working unchanged.
         address paymentToken;
+
+        // ── v5 additions (always append at end to preserve Diamond storage layout) ──────────
+
+        /// @dev Fee rates snapshotted from the global HedgeFeeConfig at createEvent() time.
+        ///      Guarantees that hedgers, LPs and the creator all operate under the fee schedule
+        ///      that was in effect when they committed capital — changes to the global config
+        ///      cannot retroactively alter active events. feeSnapshotSet is false on pre-v5
+        ///      events; callers fall back to the global config in that case.
+        uint256 snapshotHedgerFeeRate;
+        uint256 snapshotPayoutFeeRate;
+        uint256 snapshotLpProfitFeeRate;
+        uint256 snapshotCreatorLoyaltyRate;
+        bool feeSnapshotSet;
+
+        /// @dev MasterChef-style premium accumulator. Scaled by ACC_PREMIUM_MULTIPLIER (1e18).
+        ///      Incremented in O(1) on every buyProtection() call instead of iterating all LP
+        ///      deposits. LPs compute their pending share lazily at claimPremiums() time.
+        uint256 accPremiumPerShare;
+
+        /// @dev Running sum of shares held by non-withdrawn LP deposits.
+        ///      Maintained in deposit() and withdrawCapital(); eliminates the O(n)
+        ///      _getTotalShares() loop that previously ran inside deposit().
+        uint256 totalActiveShares;
     }
 
     /**
@@ -158,6 +181,9 @@ library LibAppStorage {
      * @param withdrawn       Whether withdrawCapital() has been successfully called.
      * @param withdrawnAt     Unix timestamp of capital withdrawal. 0 before withdrawal.
      * @param createdAt       Unix timestamp of deposit creation.
+     * @param rewardDebt      MasterChef reward debt (v5). Scaled by ACC_PREMIUM_MULTIPLIER (1e18).
+     *                        Set at deposit time to prevent the LP from claiming premiums that
+     *                        were distributed before they joined. Updated after each claim.
      */
     struct HedgeLpDeposit {
         uint256 id;
@@ -170,6 +196,8 @@ library LibAppStorage {
         bool withdrawn;
         uint256 withdrawnAt;
         uint256 createdAt;
+        /// @dev Appended at end to preserve Diamond storage layout for existing deployments.
+        uint256 rewardDebt;
     }
 
     /**

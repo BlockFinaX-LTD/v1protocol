@@ -60,8 +60,14 @@ contract BlockFinaXHedgeFacet {
     /// @dev Hard cap on hedger positions per event. Bounds the gas cost of settleEvent().
     uint256 constant MAX_POSITIONS_PER_EVENT = 500;
 
-    /// @dev Hard cap on LP deposits per event. Bounds the gas cost of _distributePremiumToLps().
+    /// @dev Hard cap on LP deposits per event. Enforced in deposit().
     uint256 constant MAX_DEPOSITS_PER_EVENT = 200;
+
+    /// @dev Precision multiplier for the MasterChef accPremiumPerShare accumulator.
+    ///      1e18 gives sufficient resolution for pools as small as $100 with $1 premiums:
+    ///        accPremiumPerShare += 1e6 * 1e18 / 1e20 = 1e4  (no precision loss)
+    ///      Safe from overflow: max shares (~1e22) * max acc (~1e16) = 1e38 << uint256 max.
+    uint256 constant ACC_PREMIUM_MULTIPLIER = 1e18;
 
     // ============================================================
     //                          EVENTS
@@ -710,6 +716,16 @@ contract BlockFinaXHedgeFacet {
         // Store the resolved token. For USDC events this is s.usdcToken; zero address is
         // never stored here — the resolution already happened in createEvent().
         evt.paymentToken = _resolvedToken;
+
+        // Fix 1 — Snapshot current fee rates onto this event so future changes to the global
+        // config cannot retroactively affect hedgers, LPs, or the creator who have already
+        // committed capital.
+        evt.snapshotHedgerFeeRate    = s.hedgeFeeConfig.hedgerFeeRate;
+        evt.snapshotPayoutFeeRate    = s.hedgeFeeConfig.hedgerPayoutFeeRate;
+        evt.snapshotLpProfitFeeRate  = s.hedgeFeeConfig.lpProfitFeeRate;
+        evt.snapshotCreatorLoyaltyRate = s.hedgeFeeConfig.creatorLoyaltyRate;
+        evt.feeSnapshotSet = true;
+
         s.hedgeCreatorEventIds[msg.sender].push(eventId);
     }
 
@@ -723,6 +739,41 @@ contract BlockFinaXHedgeFacet {
         LibAppStorage.HedgeEvent storage evt
     ) internal view returns (address) {
         return evt.paymentToken == address(0) ? s.usdcToken : evt.paymentToken;
+    }
+
+    /**
+     * @dev Returns the fee rates applicable to an event.
+     *      v5+ events have rates snapshotted at creation (feeSnapshotSet = true).
+     *      Pre-v5 events fall back to the current global config for backward compatibility.
+     *
+     * @return hedgerFeeRate      Platform fee on notional at buyProtection().
+     * @return payoutFeeRate      Platform fee on gross payout at claimPayout().
+     * @return lpProfitFeeRate    Platform fee on premium claim at claimPremiums().
+     * @return creatorLoyaltyRate Share of every platform fee credited to the event creator.
+     */
+    function _eventFees(
+        LibAppStorage.HedgeEvent storage evt,
+        LibAppStorage.AppStorage storage s
+    ) internal view returns (
+        uint256 hedgerFeeRate,
+        uint256 payoutFeeRate,
+        uint256 lpProfitFeeRate,
+        uint256 creatorLoyaltyRate
+    ) {
+        if (evt.feeSnapshotSet) {
+            return (
+                evt.snapshotHedgerFeeRate,
+                evt.snapshotPayoutFeeRate,
+                evt.snapshotLpProfitFeeRate,
+                evt.snapshotCreatorLoyaltyRate
+            );
+        }
+        return (
+            s.hedgeFeeConfig.hedgerFeeRate,
+            s.hedgeFeeConfig.hedgerPayoutFeeRate,
+            s.hedgeFeeConfig.lpProfitFeeRate,
+            s.hedgeFeeConfig.creatorLoyaltyRate
+        );
     }
 
     /**
@@ -741,8 +792,14 @@ contract BlockFinaXHedgeFacet {
         dep.eventId = eventId;
         dep.lp = msg.sender;
         dep.amount = amount;
-        dep.shares = amount * SHARES_PRECISION / PRECISION;
+        uint256 shares = amount * SHARES_PRECISION / PRECISION;
+        dep.shares = shares;
         dep.createdAt = block.timestamp;
+        // Fix 4 (MasterChef): accPremiumPerShare = 0 at creation, so rewardDebt = 0.
+        // Explicitly stored for clarity; zero-init is the Solidity default.
+        dep.rewardDebt = 0;
+        // Maintain running total so deposit() and _distributePremiumToLps() are O(1).
+        s.hedgeEvents[eventId].totalActiveShares += shares;
         s.hedgeEventDepositIds[eventId].push(depositId);
         s.lpDepositIds[msg.sender].push(depositId);
         return depositId;
@@ -789,8 +846,7 @@ contract BlockFinaXHedgeFacet {
      * @dev Shares represent a proportional claim on pool liquidity and premium distributions.
      *      Share price at deposit time = totalLiquidity / totalShares (Balancer-style).
      *      If the pool has no liquidity, shares are minted at the base rate.
-     *      Deposits are capped at MAX_DEPOSITS_PER_EVENT (200) to bound the gas cost of
-     *      _distributePremiumToLps(), which iterates over all deposits at each buyProtection().
+     *      Deposits are capped at MAX_DEPOSITS_PER_EVENT (200).
      *
      *      CEI order: all state changes occur before the USDC transfer.
      *
@@ -817,19 +873,24 @@ contract BlockFinaXHedgeFacet {
         );
 
         bool isCreator = msg.sender == evt.creator;
-        require(isCreator || evt.allowExternalLp, "Pool is private");
+        // Fix 2 — creator can always deposit (to seed liquidity before pool opens).
+        // External LPs require both poolOpen AND allowExternalLp so the creator's
+        // explicit pool-closed intent is enforced.
+        require(isCreator || (evt.poolOpen && evt.allowExternalLp), "Pool closed to external LPs");
 
         // --- Effects ---
+        // Fix 4 (MasterChef): use evt.totalActiveShares maintained in O(1) rather than
+        // the old _getTotalShares() O(n) loop.
         uint256 shares;
         if (evt.totalLiquidity == 0) {
             shares = _amount * SHARES_PRECISION / PRECISION;
         } else {
-            uint256 totalShares = _getTotalShares(s, _eventId);
-            shares = (_amount * totalShares) / evt.totalLiquidity;
+            shares = (_amount * evt.totalActiveShares) / evt.totalLiquidity;
         }
 
         evt.totalLiquidity += _amount;
         evt.lpCount++;
+        evt.totalActiveShares += shares;
 
         uint256 depositId = ++s.hedgeLpDepositCounter;
         LibAppStorage.HedgeLpDeposit storage dep = s.hedgeLpDeposits[depositId];
@@ -839,6 +900,9 @@ contract BlockFinaXHedgeFacet {
         dep.amount = _amount;
         dep.shares = shares;
         dep.createdAt = block.timestamp;
+        // Fix 4 (MasterChef): set rewardDebt to the current accumulator value so this
+        // LP cannot claim premiums that were distributed before they joined.
+        dep.rewardDebt = (shares * evt.accPremiumPerShare) / ACC_PREMIUM_MULTIPLIER;
 
         s.hedgeEventDepositIds[_eventId].push(depositId);
         s.lpDepositIds[msg.sender].push(depositId);
@@ -910,8 +974,11 @@ contract BlockFinaXHedgeFacet {
         uint256 availableLiquidity = evt.totalLiquidity - evt.totalMaxPayout;
         require(predeterminedPayout <= availableLiquidity, "Insufficient pool liquidity for payout");
 
+        // Fix 1 — use fee rates snapshotted at event creation, not the current global config.
+        (uint256 hedgerFeeRate, , , uint256 creatorLoyaltyRate) = _eventFees(evt, s);
+
         uint256 premium = (_notional * evt.premiumRate) / PRECISION;
-        uint256 platformFee = (_notional * s.hedgeFeeConfig.hedgerFeeRate) / PRECISION;
+        uint256 platformFee = (_notional * hedgerFeeRate) / PRECISION;
         uint256 totalCost = premium + platformFee;
 
         // --- Effects ---
@@ -937,7 +1004,7 @@ contract BlockFinaXHedgeFacet {
 
         _distributePremiumToLps(s, _eventId, premium);
 
-        uint256 creatorReward = (platformFee * s.hedgeFeeConfig.creatorLoyaltyRate) / PRECISION;
+        uint256 creatorReward = (platformFee * creatorLoyaltyRate) / PRECISION;
         evt.creatorEarnings += creatorReward;
         uint256 netPlatformFee = platformFee - creatorReward;
         s.hedgePlatformFeesCollected += netPlatformFee;
@@ -987,6 +1054,14 @@ contract BlockFinaXHedgeFacet {
         require(evt.id > 0, "Event not found");
         require(evt.status == LibAppStorage.HedgeEventStatus.Open, "Already settled");
         require(_settlementPrice > 0, "Invalid price");
+        // Fix 3 — Fallback oracle guard: prevent settling an event that nobody has joined.
+        // An event with zero hedger positions has nothing to resolve and settling it early
+        // would allow front-running the pool (settle before any user can participate).
+        // After expiry the event can always be closed regardless of participation.
+        require(
+            evt.hedgerCount > 0 || block.timestamp >= evt.expiryDate,
+            "Cannot settle: no hedger positions and event has not expired"
+        );
 
         bool triggered = evt.strikeAbove
             ? _settlementPrice >= evt.strike
@@ -1042,14 +1117,17 @@ contract BlockFinaXHedgeFacet {
         );
         require(pos.payoutAmount > 0, "No payout");
 
+        // Fix 1 — load the event first so we can use its snapshotted fee rates.
+        LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[pos.eventId];
+        (, uint256 payoutFeeRate, , uint256 creatorLoyaltyRate) = _eventFees(evt, s);
+
         uint256 grossPayout = pos.payoutAmount;
-        uint256 payoutFee = (grossPayout * s.hedgeFeeConfig.hedgerPayoutFeeRate) / PRECISION;
+        uint256 payoutFee = (grossPayout * payoutFeeRate) / PRECISION;
         uint256 netPayout = grossPayout - payoutFee;
         // L003: guard against a zero-value transfer (possible only if hedgerPayoutFeeRate = 100%).
         require(netPayout > 0, "Net payout rounds to zero");
 
-        uint256 creatorReward = (payoutFee * s.hedgeFeeConfig.creatorLoyaltyRate) / PRECISION;
-        LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[pos.eventId];
+        uint256 creatorReward = (payoutFee * creatorLoyaltyRate) / PRECISION;
         evt.creatorEarnings += creatorReward;
         uint256 netPayoutFee = payoutFee - creatorReward;
         s.hedgePlatformFeesCollected += netPayoutFee;
@@ -1091,16 +1169,23 @@ contract BlockFinaXHedgeFacet {
         require(dep.id > 0, "Deposit not found");
         require(msg.sender == dep.lp, "Not your deposit");
 
-        uint256 claimable = dep.premiumsEarned - dep.premiumsClaimed;
+        // Fix 4 (MasterChef): compute claimable using the accumulator rather than the
+        // push-distributed premiumsEarned field.  rewardDebt records the value of
+        // (shares * accPremiumPerShare) the last time this LP claimed or deposited.
+        LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[dep.eventId];
+        uint256 accured = (dep.shares * evt.accPremiumPerShare) / ACC_PREMIUM_MULTIPLIER;
+        uint256 claimable = accured - dep.rewardDebt;
         require(claimable > 0, "No premiums to claim");
 
-        uint256 lpFee = (claimable * s.hedgeFeeConfig.lpProfitFeeRate) / PRECISION;
+        // Fix 1 — use fee rates snapshotted at event creation.
+        (, , uint256 lpProfitFeeRate, uint256 creatorLoyaltyRate) = _eventFees(evt, s);
+
+        uint256 lpFee = (claimable * lpProfitFeeRate) / PRECISION;
         uint256 netAmount = claimable - lpFee;
         // L003: guard against zero-value transfer (possible only if lpProfitFeeRate = 100%).
         require(netAmount > 0, "Net premium amount rounds to zero");
 
-        uint256 creatorReward = (lpFee * s.hedgeFeeConfig.creatorLoyaltyRate) / PRECISION;
-        LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[dep.eventId];
+        uint256 creatorReward = (lpFee * creatorLoyaltyRate) / PRECISION;
         evt.creatorEarnings += creatorReward;
         uint256 netLpFee = lpFee - creatorReward;
         s.hedgePlatformFeesCollected += netLpFee;
@@ -1108,6 +1193,9 @@ contract BlockFinaXHedgeFacet {
         address token = _getEventToken(s, evt);
         s.platformFeesByToken[token] += netLpFee;
 
+        // Update rewardDebt and tracking fields before the transfer (CEI).
+        dep.rewardDebt = accured;
+        dep.premiumsEarned += claimable;
         dep.premiumsClaimed += claimable;
 
         IERC20(token).safeTransfer(msg.sender, netAmount);
@@ -1153,6 +1241,14 @@ contract BlockFinaXHedgeFacet {
 
         dep.withdrawn = true;
         dep.withdrawnAt = block.timestamp;
+
+        // Fix 4 (MasterChef): keep totalActiveShares accurate so future premium distributions
+        // do not credit shares belonging to withdrawn deposits.
+        if (evt.totalActiveShares >= dep.shares) {
+            evt.totalActiveShares -= dep.shares;
+        } else {
+            evt.totalActiveShares = 0; // underflow guard; should not occur in normal operation
+        }
 
         uint256 withdrawAmount = dep.amount;
 
@@ -1465,63 +1561,45 @@ contract BlockFinaXHedgeFacet {
     // ============================================================
 
     /**
-     * @dev Distribute a premium amount proportionally to all active (non-withdrawn) LPs
-     *      based on their share of the total pool shares.
+     * @dev Fix 4 — MasterChef-style O(1) premium accumulator.
      *
-     *      The loop is bounded by MAX_DEPOSITS_PER_EVENT (enforced in deposit()).
-     *      Minor integer rounding dust (1–N wei) may accumulate in the contract
-     *      over many buyProtection() calls; this is non-exploitable and negligible.
+     *      Previous implementation iterated all LP deposits on every buyProtection() call
+     *      (up to 200 iterations, ~3-5M gas at scale).  This replacement updates a single
+     *      per-event accumulator in constant time; LPs pull their share lazily at
+     *      claimPremiums() time using the (shares × accPremiumPerShare − rewardDebt) formula.
+     *
+     *      totalActiveShares is maintained by deposit() (+shares) and withdrawCapital() (−shares),
+     *      so no loop is needed here either.
      *
      * @param s        Reference to AppStorage.
-     * @param _eventId The event whose LP deposits receive the premium.
-     * @param _premium Total premium to distribute (USDC, 6 decimals).
+     * @param _eventId The event to distribute premiums for.
+     * @param _premium Total premium to distribute across all active LP deposits (USDC, 6 dec).
      */
     function _distributePremiumToLps(
         LibAppStorage.AppStorage storage s,
         uint256 _eventId,
         uint256 _premium
     ) internal {
-        uint256[] storage depositIds = s.hedgeEventDepositIds[_eventId];
-        uint256 totalShares = _getTotalShares(s, _eventId);
-
-        if (totalShares == 0) return;
-
-        // G001: cache array length; G011: use pre-increment.
-        uint256 len = depositIds.length;
-        for (uint256 i = 0; i < len; ++i) {
-            LibAppStorage.HedgeLpDeposit storage dep = s.hedgeLpDeposits[depositIds[i]];
-            if (dep.withdrawn) continue;
-
-            uint256 lpShare = (_premium * dep.shares) / totalShares;
-            dep.premiumsEarned += lpShare;
-        }
+        LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
+        if (evt.totalActiveShares == 0) return;
+        // Accumulate premium per share; all precision loss is bounded by ACC_PREMIUM_MULTIPLIER.
+        evt.accPremiumPerShare += (_premium * ACC_PREMIUM_MULTIPLIER) / evt.totalActiveShares;
     }
 
     /**
-     * @dev Calculate the sum of shares held by all non-withdrawn LP deposits for an event.
-     *      Used as the denominator when distributing premiums proportionally.
-     *      The loop is bounded by MAX_DEPOSITS_PER_EVENT (enforced in deposit()).
+     * @notice Return the gross premiums pending (before fees) for an LP deposit.
+     * @dev Equivalent to the amount claimPremiums() would compute before deducting lpProfitFeeRate.
+     *      Returns 0 if the deposit has been withdrawn.
      *
-     * @param s        Reference to AppStorage.
-     * @param _eventId The event to calculate total shares for.
-     * @return total   Sum of shares across all active (non-withdrawn) deposits.
+     * @param _depositId The LP deposit to query.
+     * @return pending   Gross USDC premiums available to claim (6 decimals).
      */
-    function _getTotalShares(
-        LibAppStorage.AppStorage storage s,
-        uint256 _eventId
-    ) internal view returns (uint256) {
-        uint256[] storage depositIds = s.hedgeEventDepositIds[_eventId];
-        uint256 total = 0;
-
-        // G001: cache array length; G011: use pre-increment.
-        uint256 len = depositIds.length;
-        for (uint256 i = 0; i < len; ++i) {
-            LibAppStorage.HedgeLpDeposit storage dep = s.hedgeLpDeposits[depositIds[i]];
-            if (!dep.withdrawn) {
-                total += dep.shares;
-            }
-        }
-
-        return total;
+    function pendingPremiums(uint256 _depositId) external view returns (uint256 pending) {
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        LibAppStorage.HedgeLpDeposit storage dep = s.hedgeLpDeposits[_depositId];
+        if (dep.id == 0 || dep.withdrawn) return 0;
+        LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[dep.eventId];
+        uint256 accured = (dep.shares * evt.accPremiumPerShare) / ACC_PREMIUM_MULTIPLIER;
+        pending = accured > dep.rewardDebt ? accured - dep.rewardDebt : 0;
     }
 }
