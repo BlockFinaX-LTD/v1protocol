@@ -1,93 +1,73 @@
-/**
- * Deploys a Gnosis Safe 2-of-3 multisig on Lisk Sepolia (or mainnet).
- *
- * Usage:
- *   OWNER_A=0x... OWNER_B=0x... OWNER_C=0x... \
- *     npx hardhat run scripts/deploy-safe.js --network liskSepolia
- *
- * Required env vars:
- *   DEPLOYER_PRIVATE_KEY  — pays gas for the deployment tx
- *   OWNER_A, OWNER_B, OWNER_C  — the three signer addresses
- *
- * The Safe requires 2-of-3 approvals for any transaction.
- * Save the printed Safe address — it becomes the new Diamond owner.
- */
+const { ethers } = require("hardhat");
+const fs = require("fs");
 
-const hre = require("hardhat");
+const SAFE_SINGLETON   = "0xd9Db270c1B5E3Bd161E8c8503c55cEABeE709552"; // v1.3.0
+const SAFE_FACTORY     = "0xa6B71E26C5e0845f74c812102Ca7114b6a896AB2"; // v1.3.0
+const FALLBACK_HANDLER = "0xf48f2B2d2a534e402487b3ee7C18c33Aec0Fe5e4";
 
-const SAFE_FACTORY_141  = "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67";
-const SAFE_SINGLETON    = "0x41675C099F32341bf84BFc5382aF534df5C7461a";
-const FALLBACK_HANDLER  = "0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99";
-
-const SAFE_FACTORY_ABI = [
-  "function createProxyWithNonce(address _singleton, bytes memory initializer, uint256 saltNonce) returns (address proxy)",
-  "event ProxyCreation(address indexed proxy, address singleton)",
+const FACTORY_ABI = [
+  "event ProxyCreation(address proxy, address singleton)",
+  "function createProxyWithNonce(address _singleton, bytes memory initializer, uint256 saltNonce) returns (address proxy)"
 ];
 
-const SAFE_SETUP_ABI = [
-  "function setup(address[] calldata _owners, uint256 _threshold, address to, bytes calldata data, address fallbackHandler, address paymentToken, uint256 payment, address payable paymentReceiver)",
+const SAFE_ABI = [
+  "function setup(address[] calldata _owners, uint256 _threshold, address to, bytes calldata data, address fallbackHandler, address paymentToken, uint256 payment, address payable paymentReceiver) external"
 ];
+
+const OWNER_1  = "0xc69352C36562ce2D4C57B38baf47cE7D1eF6b891";
+const OWNER_2  = "0x6C0e8E46728953322C83cD2A0c3eDa122F077723";
+const THRESHOLD = 2;
 
 async function main() {
-  const [deployer] = await hre.ethers.getSigners();
+  const [deployer] = await ethers.getSigners();
   console.log("Deployer:", deployer.address);
+  const bal = await deployer.provider.getBalance(deployer.address);
+  console.log("Balance:", ethers.formatEther(bal), "ETH\n");
 
-  const OWNER_A = process.env.OWNER_A;
-  const OWNER_B = process.env.OWNER_B;
-  const OWNER_C = process.env.OWNER_C;
-
-  if (!OWNER_A || !OWNER_B || !OWNER_C) {
-    throw new Error("Set OWNER_A, OWNER_B, OWNER_C env vars (the three signer addresses)");
-  }
-
-  const owners = [OWNER_A, OWNER_B, OWNER_C];
-  const threshold = 2;
-
-  console.log("\nSafe owners (2-of-3 threshold):");
-  owners.forEach((o, i) => console.log(`  Owner ${i + 1}: ${o}`));
-  console.log(`  Threshold: ${threshold}`);
-
-  const safeInterface = new hre.ethers.Interface(SAFE_SETUP_ABI);
-  const initializer = safeInterface.encodeFunctionData("setup", [
-    owners,
-    threshold,
-    hre.ethers.ZeroAddress,
+  const safeIface   = new ethers.Interface(SAFE_ABI);
+  const initializer = safeIface.encodeFunctionData("setup", [
+    [OWNER_1, OWNER_2],
+    THRESHOLD,
+    ethers.ZeroAddress,
     "0x",
     FALLBACK_HANDLER,
-    hre.ethers.ZeroAddress,
+    ethers.ZeroAddress,
     0,
-    hre.ethers.ZeroAddress,
+    ethers.ZeroAddress
   ]);
 
-  const factory = new hre.ethers.Contract(SAFE_FACTORY_141, SAFE_FACTORY_ABI, deployer);
-
+  const factory   = new ethers.Contract(SAFE_FACTORY, FACTORY_ABI, deployer);
   const saltNonce = Date.now();
-  console.log("\nDeploying Safe via proxy factory...");
-  const tx = await factory.createProxyWithNonce(SAFE_SINGLETON, initializer, saltNonce);
+
+  console.log("Deploying 2-of-2 Gnosis Safe...");
+  console.log("Owner 1:", OWNER_1);
+  console.log("Owner 2:", OWNER_2);
+  console.log("Threshold:", THRESHOLD);
+
+  const tx      = await factory.createProxyWithNonce(SAFE_SINGLETON, initializer, saltNonce);
   const receipt = await tx.wait();
 
-  const event = receipt.logs.find((log) => {
+  const factoryIface = new ethers.Interface(FACTORY_ABI);
+  let safeAddress = null;
+  for (const log of receipt.logs) {
     try {
-      const parsed = factory.interface.parseLog(log);
-      return parsed?.name === "ProxyCreation";
-    } catch {
-      return false;
-    }
-  });
+      const parsed = factoryIface.parseLog({ topics: log.topics, data: log.data });
+      if (parsed && parsed.name === "ProxyCreation") {
+        safeAddress = parsed.args.proxy;
+        break;
+      }
+    } catch {}
+  }
 
-  if (!event) throw new Error("ProxyCreation event not found in receipt");
-  const parsed = factory.interface.parseLog(event);
-  const safeAddress = parsed.args[0];
+  if (!safeAddress) throw new Error("ProxyCreation event not found — check receipt logs");
 
-  console.log("\n=== Safe deployed ===");
-  console.log("Safe address:  ", safeAddress);
-  console.log("Tx hash:       ", receipt.hash);
-  console.log("Threshold:      2-of-3");
-  console.log("\nNext step:");
-  console.log("  SAFE_ADDRESS=" + safeAddress + " npx hardhat run scripts/transfer-ownership-to-safe.js --network liskSepolia");
+  console.log("\n✅ Safe deployed at:", safeAddress);
+  console.log("Tx:", tx.hash);
+  console.log("Blockscout: https://blockscout.lisk.com/address/" + safeAddress);
+
+  const out = { safeAddress, owners: [OWNER_1, OWNER_2], threshold: THRESHOLD, txHash: tx.hash, deployedAt: new Date().toISOString() };
+  fs.writeFileSync("deployments-safe-liskMainnet.json", JSON.stringify(out, null, 2));
+  console.log("\nSaved to deployments-safe-liskMainnet.json");
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exitCode = 1;
-});
+main().catch(e => { console.error(e.message); process.exit(1); });
