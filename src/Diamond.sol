@@ -7,6 +7,11 @@ import {LibAppStorage} from "./libraries/LibAppStorage.sol";
 
 contract Diamond {
     constructor(address _contractOwner, address _diamondCutFacet, address _usdcToken) payable {
+        require(_contractOwner  != address(0), "Diamond: zero owner");
+        require(_diamondCutFacet != address(0), "Diamond: zero cut facet");
+        require(_usdcToken      != address(0), "Diamond: zero USDC");
+        require(_diamondCutFacet.code.length > 0, "Diamond: cut facet has no code");
+
         LibDiamond.setContractOwner(_contractOwner);
 
         // Initialize app storage
