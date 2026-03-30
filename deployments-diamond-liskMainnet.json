@@ -1,0 +1,39 @@
+{
+  "network": "lisk",
+  "chainId": 1135,
+  "deployedAt": "2026-03-30",
+  "diamond": "0x3eDfA00a1E3C158A591097de2FA1756aCD66860D",
+  "facets": {
+    "DiamondCutFacet":    "0x3581E16414286AD77601f9489F26a11eD96A9Be4",
+    "DiamondLoupeFacet":  "0xcC594031d1c059Eb1d6bCb0c7b1c82D31115E6E6",
+    "HedgeFacet":         "0xCd84f1493497Dbaf5C1933907bD2D253a54233Bf",
+    "OracleFacet":        "0xA7af536A57eA2c20a3a3ae6B70b6943c78226f73"
+  },
+  "tokens": {
+    "USDC": "0xF242275d3a6527d877f2c927a82D9b057609cc71",
+    "USDT": "0x05D032ac25d322df992303dCa074EE7392C117b9"
+  },
+  "transactions": {
+    "deployDiamondCutFacet": "first-run-batch",
+    "deployDiamond":         "first-run-batch",
+    "deployLoupeFacet":      "first-run-batch",
+    "deployHedgeFacet":      "first-run-batch",
+    "deployOracleFacet":     "first-run-batch",
+    "diamondCut":            "0x70338405603288cbf7791912090a23e99e6a5f0c34c3e4e82a0dacae408d425d",
+    "initializeHedgeFees":   "0xba1d01cadd62d313adb3b9f627fff5e5f66fbdc1a7c72585463248ce7cb668e2"
+  },
+  "config": {
+    "creationFee_usdc":      "25000000",
+    "hedgerFeeRate_bps":     "5000",
+    "hedgerPayoutFeeRate_bps": "10000",
+    "lpProfitFeeRate_bps":   "10000",
+    "creatorLoyaltyRate_bps":"50000"
+  },
+  "pendingActions": [
+    "Register oracle wallets (addOracle x2+, setRequiredSigners(2))",
+    "transferOwnership() to Gnosis Safe 0x60719b73880710a2A471C21140515A6Cc8305fDB",
+    "Safe calls acceptOwnership()",
+    "Verify all contracts on Blockscout",
+    "After oracle nodes live: call activateOracleV2()"
+  ]
+}

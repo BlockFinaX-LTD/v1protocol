@@ -34,9 +34,9 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Return every function selector exposed by a contract (excluding init(bytes)). */
 function getSelectors(contract) {
-  return Object.keys(contract.interface.functions)
-    .filter((sig) => sig !== "init(bytes)")
-    .map((sig) => contract.interface.getFunction(sig).selector);
+  return contract.interface.fragments
+    .filter(f => f.type === "function")
+    .map(f => contract.interface.getFunction(f.name).selector);
 }
 
 /** Canonical USDC addresses per chain. */
@@ -44,8 +44,8 @@ const USDC_ADDRESSES = {
   84532: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // Base Sepolia
   4202:  "0xf52Ad63619Bf9cFeF510341ac6b4038554399562", // Lisk Sepolia (testnet USDC)
   8453:  "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // Base Mainnet
-  // Lisk Mainnet: set USDC_LISK_MAINNET env var — verify address at https://blockscout.lisk.com
-  1135:  process.env.USDC_LISK_MAINNET || "0x",
+  // Lisk Mainnet — verified at https://blockscout.lisk.com/tokens
+  1135:  "0xF242275d3a6527d877f2c927a82D9b057609cc71",
 };
 
 async function main() {
@@ -138,54 +138,8 @@ async function main() {
   // ────────────────────────────────────────────────────────────────────────────
   // Build selector lists
   // ────────────────────────────────────────────────────────────────────────────
-  const loupeSelectors = getSelectors(loupeFacet);
-
-  // Explicit list for HedgeFacet so nothing is silently missed when the ABI changes.
-  const hedgeSelectors = [
-    // ── Admin ──────────────────────────────────────────────────────────────
-    hedgeFacet.interface.getFunction("initializeHedgeFees").selector,
-    hedgeFacet.interface.getFunction("setOracleAdmin").selector,
-    hedgeFacet.interface.getFunction("withdrawPlatformFees").selector,
-    // Two-step ownership
-    hedgeFacet.interface.getFunction("transferOwnership").selector,
-    hedgeFacet.interface.getFunction("acceptOwnership").selector,
-    hedgeFacet.interface.getFunction("pendingOwner").selector,
-    // Emergency pause
-    hedgeFacet.interface.getFunction("pause").selector,
-    hedgeFacet.interface.getFunction("unpause").selector,
-    // ETH rescue
-    hedgeFacet.interface.getFunction("rescueETH").selector,
-
-    // ── Core lifecycle ──────────────────────────────────────────────────────
-    hedgeFacet.interface.getFunction("createEvent").selector,
-    hedgeFacet.interface.getFunction("setPoolSettings").selector,
-    hedgeFacet.interface.getFunction("deposit").selector,
-    hedgeFacet.interface.getFunction("buyProtection").selector,
-    hedgeFacet.interface.getFunction("settleEvent").selector,
-    hedgeFacet.interface.getFunction("claimPayout").selector,
-    hedgeFacet.interface.getFunction("claimPremiums").selector,
-    hedgeFacet.interface.getFunction("withdrawCapital").selector,
-    hedgeFacet.interface.getFunction("withdrawCreatorEarnings").selector,
-
-    // ── Views ───────────────────────────────────────────────────────────────
-    hedgeFacet.interface.getFunction("isPaused").selector,
-    hedgeFacet.interface.getFunction("isFeesInitialized").selector,
-    hedgeFacet.interface.getFunction("getHedgeEventCore").selector,
-    hedgeFacet.interface.getFunction("getHedgeEventStats").selector,
-    hedgeFacet.interface.getFunction("getHedgePosition").selector,
-    hedgeFacet.interface.getFunction("getHedgeLpDeposit").selector,
-    hedgeFacet.interface.getFunction("getEventPositionIds").selector,
-    hedgeFacet.interface.getFunction("getEventDepositIds").selector,
-    hedgeFacet.interface.getFunction("getCreatorEventIds").selector,
-    hedgeFacet.interface.getFunction("getHedgerPositionIds").selector,
-    hedgeFacet.interface.getFunction("getLpDepositIds").selector,
-    hedgeFacet.interface.getFunction("getHedgeFeeConfig").selector,
-    hedgeFacet.interface.getFunction("getHedgePlatformFees").selector,
-    hedgeFacet.interface.getFunction("getTotalHedgeEvents").selector,
-    hedgeFacet.interface.getFunction("getPoolUtilization").selector,
-  ];
-
-  // OracleFacet: use reflection so any new function is automatically included.
+  const loupeSelectors  = getSelectors(loupeFacet);
+  const hedgeSelectors  = getSelectors(hedgeFacet);   // auto-discovers all functions incl. v6 additions
   const oracleSelectors = getSelectors(oracleFacet);
 
   console.log(
