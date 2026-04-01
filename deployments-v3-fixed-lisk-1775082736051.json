@@ -1,0 +1,46 @@
+{
+  "version": "v3-fixed",
+  "standard": "EIP-2535 Diamond",
+  "auditFixesApplied": [
+    "C-01",
+    "H-01",
+    "H-02",
+    "H-03",
+    "M-01",
+    "M-02",
+    "M-03",
+    "M-04",
+    "L-03",
+    "L-05"
+  ],
+  "network": "lisk",
+  "chainId": 1135,
+  "diamond": "0x885E663645173a0791b82f0e6608921D31E3D700",
+  "facets": {
+    "bootstrapDiamondCutFacet": "0xb62Bb0A47Ff965d990b42752D9ceB34923FBae8b",
+    "blockFinaXDiamondLoupe": "0x4BC4C8574b0a49Ab1257ac6Ed7dd01a236ed0a66",
+    "blockFinaXHedge": "0x96aCAD2039F1796929Eba578C81fe12E8f23C989",
+    "blockFinaXOracle": "0xAEcE90e767E257dE7cd9C6E1e93cEb880575C394",
+    "blockFinaXTimelockCut": "0xaC939C0897981Abc0711ec4e37527F13106180fc"
+  },
+  "config": {
+    "usdcToken": "0xF242275d3a6527d877f2c927a82D9b057609cc71",
+    "oracleAdmin": "0xef5Bed7c221c85A2c88e3c0223ee45482d6F037d",
+    "hedgeFees": {
+      "eventCreationFee": "25000000",
+      "hedgerFeeRate": "5000",
+      "hedgerPayoutFeeRate": "10000",
+      "lpProfitFeeRate": "10000",
+      "creatorLoyaltyRate": "50000"
+    },
+    "oraclesRegistered": [
+      "0x1F038152d5E6F120E26f8F11688cB9Dc27703236",
+      "0x488F6090Ede627cddf3f4f12E46FB5665EBBCcfA",
+      "0x4fA8B101ed6E80F06D3eB2910381ff2901a0cbD3"
+    ],
+    "oracleV2Active": false,
+    "pendingOwner": "0xfce89FA90Ee1C78B15eE0f12f62B03153814699D"
+  },
+  "deployer": "0xef5Bed7c221c85A2c88e3c0223ee45482d6F037d",
+  "timestamp": "2026-04-01T22:32:16.051Z"
+}

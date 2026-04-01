@@ -165,19 +165,23 @@ async function main() {
     `Timelock: ${timelockSelectors.length}`
   );
 
+  // Split timelock selectors into two groups:
+  //   - All selectors that don't exist yet in the diamond → Add (action 0)
+  //   - The diamondCut selector, which already exists from the bootstrap → Replace (action 1)
+  // This avoids the "Can't add function that already exists" revert from LibDiamondCut.
+  const timelockNewSelectors  = timelockSelectors.filter(s => s !== DIAMOND_CUT_SELECTOR);
+  const timelockReplaceSelectors = timelockSelectors.filter(s => s === DIAMOND_CUT_SELECTOR);
+
   const facetCuts = [
-    // Add facets
-    { facetAddress: await loupeFacet.getAddress(),   action: 0, functionSelectors: loupeSelectors    },
-    { facetAddress: await hedgeFacet.getAddress(),   action: 0, functionSelectors: hedgeSelectors    },
-    { facetAddress: await oracleFacet.getAddress(),  action: 0, functionSelectors: oracleSelectors   },
-    // Add TimelockCutFacet (includes the diamondCut selector — replaces the bootstrap one)
-    { facetAddress: timelockAddr,                    action: 0, functionSelectors: timelockSelectors },
-    // Remove the bootstrap DiamondCutFacet's diamondCut selector (C-01 fix)
-    // The TimelockCutFacet's diamondCut selector was already added above, so
-    // Diamond.fallback() will now route diamondCut() to the timelocked version.
-    // We remove the *old* facet address mapping by removing its selector list,
-    // which is just the single diamondCut selector.
-    { facetAddress: hre.ethers.ZeroAddress,          action: 2, functionSelectors: [DIAMOND_CUT_SELECTOR] },
+    // Add all new selectors from the three application facets
+    { facetAddress: await loupeFacet.getAddress(),  action: 0, functionSelectors: loupeSelectors       },
+    { facetAddress: await hedgeFacet.getAddress(),  action: 0, functionSelectors: hedgeSelectors       },
+    { facetAddress: await oracleFacet.getAddress(), action: 0, functionSelectors: oracleSelectors      },
+    // Add all NEW selectors from TimelockCutFacet (executeCut, cancelCut, getProposal, etc.)
+    { facetAddress: timelockAddr,                   action: 0, functionSelectors: timelockNewSelectors  },
+    // C-01 fix: Replace the bootstrap DiamondCutFacet's diamondCut selector with the
+    // TimelockCutFacet implementation — atomic swap, no gap where raw cut is live.
+    { facetAddress: timelockAddr,                   action: 1, functionSelectors: timelockReplaceSelectors },
   ];
 
   const diamondCutViaBootstrap = await hre.ethers.getContractAt(
