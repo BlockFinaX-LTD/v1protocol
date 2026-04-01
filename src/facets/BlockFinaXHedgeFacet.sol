@@ -294,10 +294,14 @@ contract BlockFinaXHedgeFacet {
 
     /**
      * @notice Set the single-key oracle admin address for direct event settlement.
-     * @dev The oracle admin can call settleEvent() directly. The Diamond owner always
-     *      retains the ability to settle regardless of this setting (dual-path via
-     *      onlyOracleAdmin modifier). Set to address(0) to disable the single-key path
-     *      and require settlement exclusively via the multi-oracle OracleFacet.
+     * @dev The oracle admin can call settleEvent() directly. The Diamond owner also
+     *      retains the ability to call settleEvent() UNLESS activateOracleV2() has been
+     *      called, after which ALL single-key settlement is permanently disabled and
+     *      settlement must go through OracleFacet.submitRate() (multi-oracle consensus).
+     *      Set to address(0) to disable the single-key oracle admin path.
+     *
+     * M-01 fix: previous comment wrongly stated the owner "always retains" settlement rights;
+     * that is only true before activateOracleV2() is called.
      *
      * @param _admin Address that will be granted oracle admin rights. Can be address(0).
      */
@@ -465,6 +469,16 @@ contract BlockFinaXHedgeFacet {
 
         address eventToken = _getEventToken(s, evt);
 
+        // H-02 fix: reconcile residual against actual on-chain token balance before crediting
+        // platform fees. totalLiquidity may overstate available tokens if capital was withdrawn
+        // or payouts were already claimed. Without this cap, platformFeesByToken could exceed
+        // the real balance and cause withdrawPlatformFeesByToken() to revert later.
+        uint256 actualBalance = IERC20(eventToken).balanceOf(address(this));
+        if (residual > actualBalance) {
+            residual = actualBalance;
+        }
+        require(residual > 0, "No recoverable payouts after balance reconciliation");
+
         // Sweep residual into platform fees for withdrawal by the owner.
         // Only credit the USDC-specific legacy counter for USDC events; non-USDC event
         // residuals (e.g. USDT) must be withdrawn via withdrawPlatformFeesByToken().
@@ -489,7 +503,9 @@ contract BlockFinaXHedgeFacet {
         require(_to != address(0), "Zero address");
         uint256 balance = address(this).balance;
         require(balance > 0, "No ETH to rescue");
-        (bool ok, ) = _to.call{value: balance}("");
+        // L-03 fix: cap gas at 2300 to prevent reentrancy via a fallback that uses excessive gas.
+        // This limits the recipient to a simple receive() — sufficient for an EOA or a Safe.
+        (bool ok, ) = _to.call{value: balance, gas: 2300}("");
         require(ok, "ETH transfer failed");
         emit ETHRescued(_to, balance);
     }
@@ -688,6 +704,19 @@ contract BlockFinaXHedgeFacet {
                 "Strike must be below current rate for downward hedge"
             );
         }
+        // M-02 fix: cap priceDelta to prevent an adversarially misconfigured event from
+        // draining an entire pool on a single position. A delta > 10× initialRate would
+        // make every payout > 10× notional — no real FX pair moves that far.
+        // This limits predeterminedPayout to at most 10× _notional per buyProtection().
+        {
+            uint256 priceDelta = _params.strikeAbove
+                ? _params.strike - _params.initialRate
+                : _params.initialRate - _params.strike;
+            require(
+                priceDelta <= _params.initialRate * 10,
+                "Strike too far from initial rate: max price delta is 10x initialRate"
+            );
+        }
 
         // Resolve and validate payment token.
         // address(0) silently uses the default usdcToken; any other address must be whitelisted.
@@ -862,7 +891,7 @@ contract BlockFinaXHedgeFacet {
         uint256 _eventId,
         bool _poolOpen,
         bool _allowExternalLp
-    ) external whenNotPaused {
+    ) external nonReentrant whenNotPaused {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
 
@@ -926,6 +955,11 @@ contract BlockFinaXHedgeFacet {
         } else {
             shares = (_amount * evt.totalActiveShares) / evt.totalLiquidity;
         }
+        // M-03 fix: guard against donation/inflation attacks where the pool is so large
+        // relative to _amount that integer division produces zero shares.
+        // A deposit that receives zero shares would contribute liquidity to the pool
+        // without receiving any claim on premiums or capital, effectively donating to LPs.
+        require(shares > 0, "Deposit too small relative to pool size: would receive zero shares");
 
         evt.totalLiquidity += _amount;
         evt.lpCount++;
@@ -1220,6 +1254,10 @@ contract BlockFinaXHedgeFacet {
 
         require(dep.id > 0, "Deposit not found");
         require(msg.sender == dep.lp, "Not your deposit");
+        // H-01 fix: block premium claims after capital has been withdrawn.
+        // dep.shares is not zeroed on withdrawal, so without this check an LP
+        // could claim premiums indefinitely after calling withdrawCapital().
+        require(!dep.withdrawn, "Capital already withdrawn: cannot claim premiums");
 
         // Fix 4 (MasterChef): compute claimable using the accumulator rather than the
         // push-distributed premiumsEarned field.  rewardDebt records the value of

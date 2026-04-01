@@ -417,6 +417,11 @@ contract BlockFinaXOracleFacet {
         uint256 count = submitters.length;
         for (uint256 i = 0; i < count; ++i) {
             delete os.submissions[_eventId][submitters[i]];
+            // H-03 fix: also clear the per-oracle cooldown timestamp.
+            // Without this, a re-opened oracle round (e.g. after forced clear) would
+            // still reject submissions from oracles that participated in the failed round,
+            // because lastSubmitTime persists across the clear and triggers the cooldown check.
+            delete os.lastSubmitTime[_eventId][submitters[i]];
         }
         delete os.submitters[_eventId];
     }
