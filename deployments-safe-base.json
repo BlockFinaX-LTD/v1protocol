@@ -1,0 +1,13 @@
+{
+  "network": "base",
+  "chainId": 8453,
+  "safeAddress": "0x7909a2f1fAd63678eEDcC5A75462B66D062189Bb",
+  "owners": [
+    "0x331B1ce9250b53e807935F65D5cd04C2234af3a0",
+    "0xc69352C36562ce2D4C57B38baf47cE7D1eF6b891",
+    "0x6C0e8E46728953322C83cD2A0c3eDa122F077723"
+  ],
+  "threshold": 2,
+  "txHash": "0x137bb7c289d49d0e0c2fd376c2a8bc607dc70c0a570a4e839b716cbed29e8b62",
+  "deployedAt": "2026-04-02T18:02:35.717Z"
+}

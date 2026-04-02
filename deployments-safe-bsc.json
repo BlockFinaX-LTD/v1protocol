@@ -1,0 +1,13 @@
+{
+  "network": "bsc",
+  "chainId": 56,
+  "safeAddress": "0x2a0ab363E01b518B189218e39f79Bfc3AE310807",
+  "owners": [
+    "0x331B1ce9250b53e807935F65D5cd04C2234af3a0",
+    "0xc69352C36562ce2D4C57B38baf47cE7D1eF6b891",
+    "0x6C0e8E46728953322C83cD2A0c3eDa122F077723"
+  ],
+  "threshold": 2,
+  "txHash": "0x388000234a384d4691f4001d68c0198b3afc493b5959955c4143a7e5db411e06",
+  "deployedAt": "2026-04-02T18:02:45.325Z"
+}
