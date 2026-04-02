@@ -46,14 +46,8 @@ module.exports = {
     }
   },
   etherscan: {
-    apiKey: {
-      baseSepolia:   process.env.BASESCAN_API_KEY || "",
-      base:          process.env.BASESCAN_API_KEY || "",
-      bscTestnet:    process.env.BSCSCAN_API_KEY  || "",
-      bsc:           process.env.BSCSCAN_API_KEY  || "",
-      liskSepolia:   "placeholder",
-      lisk:          "placeholder"
-    },
+    // Single Etherscan v2 API key covers Base, BSC, and all Etherscan-family explorers
+    apiKey: process.env.ETHERSCAN_API_KEY || "",
     customChains: [
       {
         network: "baseSepolia",
