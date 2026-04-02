@@ -1,0 +1,15 @@
+{
+  "version": "v6-audit",
+  "diamond": "0x885E663645173a0791b82f0e6608921D31E3D700",
+  "proposalId": "0x79db66158c2bac1201f23f5bd3caf4fcb6e4db166f9e5902811ec64ceee955ce",
+  "eta": "1775309491",
+  "etaISO": "2026-04-04T13:31:31.000Z",
+  "newFacets": {
+    "blockFinaXHedge": "0xda7E12f31F6cAcF61366b0fBbfE25378e853c3AD",
+    "blockFinaXOracle": "0x770F0E947E9a838091dC4ddc33D85B79799DF33A",
+    "blockFinaXDiamondLoupe": "0x31098B8fF039cfb400bee2c272004dcf03C2AF06",
+    "blockFinaXTimelockCut": "0xbCC51E62C4948FD35ab505bd71804C849601e4Ef"
+  },
+  "proposeTx": "0xa38181a08eec08da38e7a0048404dc5a393741ecf90f5d62f9615286d10bd40b",
+  "timestamp": "2026-04-02T13:31:33.284Z"
+}
