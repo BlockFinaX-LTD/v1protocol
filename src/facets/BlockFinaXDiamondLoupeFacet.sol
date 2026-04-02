@@ -29,6 +29,9 @@ contract BlockFinaXDiamondLoupeFacet is IDiamondLoupe {
 
     function facetAddress(bytes4 _functionSelector) external view override returns (address facetAddress_) {
         LibDiamond.DiamondStorage storage ds = LibDiamond.diamondStorage();
+        // H-4 note: selectorToFacetAndPosition in this implementation maps bytes4 → address
+        // directly (LibDiamond.sol line 10), not to a struct. The mapping already returns
+        // the facet address with no field access required. Confirmed correct.
         facetAddress_ = ds.selectorToFacetAndPosition[_functionSelector];
     }
 }

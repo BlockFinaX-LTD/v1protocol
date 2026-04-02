@@ -151,8 +151,15 @@ contract BlockFinaXOracleFacet {
         os.oracles.push(_oracle);
         os.isOracle[_oracle] = true;
 
-        if (os.requiredSigners == 0) os.requiredSigners = 2;
-        if (os.toleranceBps == 0) os.toleranceBps = 100;
+        // M-7 fix: emit OracleConfigUpdated when defaults are initialised on first addOracle().
+        // Without this event, off-chain monitors have no way to discover the effective
+        // requiredSigners and toleranceBps values unless they query getOracleConfig().
+        bool configChanged = false;
+        if (os.requiredSigners == 0) { os.requiredSigners = 2; configChanged = true; }
+        if (os.toleranceBps == 0)    { os.toleranceBps = 100; configChanged = true; }
+        if (configChanged) {
+            emit OracleConfigUpdated(os.requiredSigners, os.toleranceBps);
+        }
 
         emit OracleAdded(_oracle);
     }
@@ -180,6 +187,17 @@ contract BlockFinaXOracleFacet {
                 break;
             }
         }
+
+        // M-6 fix: after removing an oracle, verify the remaining oracle count still
+        // satisfies the configured requiredSigners threshold. Without this guard, an owner
+        // could accidentally create a configuration where consensus is mathematically
+        // impossible (e.g. requiredSigners = 3 but only 2 oracles remain), permanently
+        // blocking settlement via the multi-oracle path.
+        require(
+            os.oracles.length >= os.requiredSigners,
+            "Removing this oracle would violate quorum (oracle count would drop below requiredSigners)"
+        );
+
         emit OracleRemoved(_oracle);
     }
 
@@ -238,7 +256,10 @@ contract BlockFinaXOracleFacet {
         address[] storage submitters = os.submitters[_eventId];
         require(submitters.length > 0, "No submissions to clear");
 
-        _clearSubmissions(_eventId, submitters, os);
+        // Admin-forced clear: isDisagreement=false so oracle cooldown timestamps are also
+        // cleared. The whole point of a manual clear is to let oracles resubmit immediately
+        // without waiting for the RESUBMIT_COOLDOWN to expire.
+        _clearSubmissions(_eventId, submitters, os, false);
         emit SubmissionsCleared(_eventId, "Manually cleared by admin");
     }
 
@@ -386,7 +407,11 @@ contract BlockFinaXOracleFacet {
         uint256 spread = ((maxPrice - minPrice) * 10000) / minPrice;
 
         if (spread > os.toleranceBps) {
-            _clearSubmissions(_eventId, submitters, os);
+            // H-3 fix: pass isDisagreement=true so _clearSubmissions preserves each oracle's
+            // lastSubmitTime. This keeps the RESUBMIT_COOLDOWN active after a disagreement
+            // clear, preventing a malicious oracle from rapidly cycling (submit → disagree →
+            // resubmit) to perpetually DoS the settlement process.
+            _clearSubmissions(_eventId, submitters, os, true);
             emit SubmissionsCleared(_eventId, "Price disagreement exceeds tolerance");
             return;
         }
@@ -396,32 +421,42 @@ contract BlockFinaXOracleFacet {
         emit ConsensusReached(_eventId, agreedPrice, validCount);
 
         // Clear before settling to prevent any re-entrancy on storage state.
-        _clearSubmissions(_eventId, submitters, os);
+        // Pass isDisagreement=false: on successful consensus, delete cooldown timestamps so
+        // oracles start fresh if this event somehow needs re-settlement (race condition guard).
+        _clearSubmissions(_eventId, submitters, os, false);
 
         _settleEvent(_eventId, agreedPrice, s);
     }
 
     /**
-     * @dev Delete all submission records for an event and reset the submitters array.
+     * @dev Delete all submission records for an event and conditionally reset cooldown timestamps.
      *
-     * @param _eventId   The event whose submissions are being cleared.
-     * @param submitters Storage reference to the submitters array.
-     * @param os         Reference to OracleStorage.
+     * @param _eventId       The event whose submissions are being cleared.
+     * @param submitters     Storage reference to the submitters array.
+     * @param os             Reference to OracleStorage.
+     * @param _isDisagreement H-3 fix: when true (price disagreement), lastSubmitTime is
+     *                        PRESERVED so the RESUBMIT_COOLDOWN remains in effect, blocking
+     *                        rapid oscillation attacks. When false (successful consensus or
+     *                        admin forced clear), lastSubmitTime is deleted to allow immediate
+     *                        resubmission in the next round.
      */
     function _clearSubmissions(
         uint256 _eventId,
         address[] storage submitters,
-        LibOracleStorage.OracleStorage storage os
+        LibOracleStorage.OracleStorage storage os,
+        bool _isDisagreement
     ) internal {
         // G001: cache length; G011: pre-increment.
         uint256 count = submitters.length;
         for (uint256 i = 0; i < count; ++i) {
-            delete os.submissions[_eventId][submitters[i]];
-            // H-03 fix: also clear the per-oracle cooldown timestamp.
-            // Without this, a re-opened oracle round (e.g. after forced clear) would
-            // still reject submissions from oracles that participated in the failed round,
-            // because lastSubmitTime persists across the clear and triggers the cooldown check.
-            delete os.lastSubmitTime[_eventId][submitters[i]];
+            address oracle = submitters[i];
+            delete os.submissions[_eventId][oracle];
+            // H-3 fix: only reset the cooldown timestamp when this is NOT a disagreement
+            // clear. On disagreement, preserving lastSubmitTime means the oracle must still
+            // wait for the RESUBMIT_COOLDOWN before submitting again, preventing DoS cycling.
+            if (!_isDisagreement) {
+                delete os.lastSubmitTime[_eventId][oracle];
+            }
         }
         delete os.submitters[_eventId];
     }
@@ -457,6 +492,11 @@ contract BlockFinaXOracleFacet {
         evt.settlementPrice = _settlementPrice;
         evt.triggered = triggered;
         evt.settledAt = block.timestamp;
+
+        // C-1 fix: snapshot totalLiquidity at settlement time so withdrawCapital() can use
+        // a consistent denominator regardless of how many LPs have already withdrawn.
+        // Mirrors the same fix applied in HedgeFacet.settleEvent().
+        evt.liquidityAtSettlement = evt.totalLiquidity;
 
         uint256[] storage positionIds = s.hedgeEventPositionIds[_eventId];
         // G001: cache array length; G011: pre-increment.

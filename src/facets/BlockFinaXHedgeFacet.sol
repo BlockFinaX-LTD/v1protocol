@@ -204,9 +204,14 @@ contract BlockFinaXHedgeFacet {
      * @dev Restricts access to either the designated oracle admin or the Diamond owner.
      *      The dual-path allows fallback settlement by the owner if the oracle admin
      *      key needs to be rotated or is temporarily unavailable.
+     *
+     *      H-1 fix: guard is enforced here in the modifier (single point of enforcement)
+     *      rather than duplicated inside settleEvent(). Once activateOracleV2() is called,
+     *      any attempt to use the single-key path reverts before executing any logic.
      */
     modifier onlyOracleAdmin() {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        require(!s.oracleV2Active, "Single-key settlement disabled: use OracleFacet");
         require(
             msg.sender == s.hedgeOracleAdmin || msg.sender == LibDiamond.contractOwner(),
             "Not oracle admin"
@@ -409,6 +414,13 @@ contract BlockFinaXHedgeFacet {
             s.platformFeesByToken[s.usdcToken] = 0;
         }
 
+        // C-2 fix: decrement internal reserve tracker before transferring tokens out.
+        if (s.tokenReserves[s.usdcToken] >= _amount) {
+            s.tokenReserves[s.usdcToken] -= _amount;
+        } else {
+            s.tokenReserves[s.usdcToken] = 0;
+        }
+
         IERC20(s.usdcToken).safeTransfer(msg.sender, _amount);
 
         emit PlatformFeesWithdrawn(msg.sender, _amount);
@@ -469,11 +481,12 @@ contract BlockFinaXHedgeFacet {
 
         address eventToken = _getEventToken(s, evt);
 
-        // H-02 fix: reconcile residual against actual on-chain token balance before crediting
-        // platform fees. totalLiquidity may overstate available tokens if capital was withdrawn
-        // or payouts were already claimed. Without this cap, platformFeesByToken could exceed
-        // the real balance and cause withdrawPlatformFeesByToken() to revert later.
-        uint256 actualBalance = IERC20(eventToken).balanceOf(address(this));
+        // C-2 fix: use internal tokenReserves instead of IERC20.balanceOf(address(this)).
+        // balanceOf is manipulable by an attacker who donates tokens directly to the contract,
+        // inflating the apparent balance and potentially crediting more platform fees than
+        // are legitimately available. tokenReserves only reflects tokens that flowed through
+        // the protocol's own accounting (safeTransferFrom / safeTransfer paths).
+        uint256 actualBalance = s.tokenReserves[eventToken];
         if (residual > actualBalance) {
             residual = actualBalance;
         }
@@ -503,9 +516,11 @@ contract BlockFinaXHedgeFacet {
         require(_to != address(0), "Zero address");
         uint256 balance = address(this).balance;
         require(balance > 0, "No ETH to rescue");
-        // L-03 fix: cap gas at 2300 to prevent reentrancy via a fallback that uses excessive gas.
-        // This limits the recipient to a simple receive() — sufficient for an EOA or a Safe.
-        (bool ok, ) = _to.call{value: balance, gas: 2300}("");
+        // L-2 fix: use 10_000 gas instead of 2300. The 2300 gas stipend is insufficient
+        // for a Gnosis Safe or any multisig with a receive() hook. 10_000 is large enough
+        // for a Safe receive() while still bounding re-entrancy risk. The nonReentrant
+        // guard provides the primary reentrancy protection.
+        (bool ok, ) = _to.call{value: balance, gas: 10_000}("");
         require(ok, "ETH transfer failed");
         emit ETHRescued(_to, balance);
     }
@@ -591,6 +606,13 @@ contract BlockFinaXHedgeFacet {
             } else {
                 s.hedgePlatformFeesCollected = 0;
             }
+        }
+
+        // C-2 fix: decrement internal reserve tracker before transferring tokens out.
+        if (s.tokenReserves[_token] >= _amount) {
+            s.tokenReserves[_token] -= _amount;
+        } else {
+            s.tokenReserves[_token] = 0;
         }
 
         IERC20(_token).safeTransfer(msg.sender, _amount);
@@ -742,6 +764,8 @@ contract BlockFinaXHedgeFacet {
 
         // --- Interactions ---
         uint256 totalAmount = creationFee + _params.initialLiquidity;
+        // C-2 fix: increment internal reserve tracker when tokens flow into the Diamond.
+        s.tokenReserves[token] += totalAmount;
         IERC20(token).safeTransferFrom(msg.sender, address(this), totalAmount);
 
         emit HedgeEventCreated(
@@ -981,7 +1005,10 @@ contract BlockFinaXHedgeFacet {
         s.lpDepositIds[msg.sender].push(depositId);
 
         // --- Interactions ---
-        IERC20(_getEventToken(s, evt)).safeTransferFrom(msg.sender, address(this), _amount);
+        address depositToken = _getEventToken(s, evt);
+        // C-2 fix: increment internal reserve tracker when tokens flow into the Diamond.
+        s.tokenReserves[depositToken] += _amount;
+        IERC20(depositToken).safeTransferFrom(msg.sender, address(this), _amount);
 
         emit LiquidityDeposited(_eventId, depositId, msg.sender, _amount, shares);
 
@@ -1017,9 +1044,13 @@ contract BlockFinaXHedgeFacet {
      *
      * @param _eventId  The event to buy protection on.
      * @param _notional Coverage amount in USDC (min 10 USDC, 6 decimals).
+     * @param _maxCost  M-3 fix: maximum acceptable total cost (premium + platform fee).
+     *                  Reverts if actual cost exceeds this value. Pass type(uint256).max to skip.
+     * @param _deadline M-3 fix: Unix timestamp after which this transaction must not execute.
+     *                  Pass type(uint256).max to skip.
      * @return positionId The ID of the newly created hedge position.
      */
-    function buyProtection(uint256 _eventId, uint256 _notional)
+    function buyProtection(uint256 _eventId, uint256 _notional, uint256 _maxCost, uint256 _deadline)
         external
         nonReentrant
         whenNotPaused
@@ -1029,6 +1060,7 @@ contract BlockFinaXHedgeFacet {
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
 
         // --- Checks ---
+        require(block.timestamp <= _deadline, "Transaction deadline expired");
         require(evt.id > 0, "Event not found");
         require(evt.status == LibAppStorage.HedgeEventStatus.Open, "Event not open");
         require(evt.poolOpen, "Pool not open for hedging");
@@ -1053,6 +1085,9 @@ contract BlockFinaXHedgeFacet {
         uint256 premium = (_notional * evt.premiumRate) / PRECISION;
         uint256 platformFee = (_notional * hedgerFeeRate) / PRECISION;
         uint256 totalCost = premium + platformFee;
+
+        // M-3 fix: slippage guard — revert if actual cost exceeds caller's stated maximum.
+        require(totalCost <= _maxCost, "Cost exceeds slippage limit");
 
         // --- Effects ---
         evt.totalExposure += _notional;
@@ -1086,6 +1121,8 @@ contract BlockFinaXHedgeFacet {
         s.platformFeesByToken[token] += netPlatformFee;
 
         // --- Interactions ---
+        // C-2 fix: increment internal reserve tracker when tokens flow into the Diamond.
+        s.tokenReserves[token] += totalCost;
         IERC20(token).safeTransferFrom(msg.sender, address(this), totalCost);
 
         emit ProtectionPurchased(
@@ -1118,7 +1155,7 @@ contract BlockFinaXHedgeFacet {
      * @param _eventId         The event to settle.
      * @param _settlementPrice The final FX rate at settlement time (6 decimals).
      */
-    // H003: nonReentrant added for defence-in-depth even though settleEvent has no
+    // H-3: nonReentrant added for defence-in-depth even though settleEvent has no
     // token transfers. Prevents cross-function reentrancy via the shared AppStorage lock.
     function settleEvent(uint256 _eventId, uint256 _settlementPrice) external onlyOracleAdmin nonReentrant {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
@@ -1127,9 +1164,9 @@ contract BlockFinaXHedgeFacet {
         require(evt.id > 0, "Event not found");
         require(evt.status == LibAppStorage.HedgeEventStatus.Open, "Already settled");
         require(_settlementPrice > 0, "Invalid price");
-        // Once activateOracleV2() has been called, all settlement must go through OracleFacet.
-        // This permanently enforces multi-oracle consensus and disables the single-key path.
-        require(!s.oracleV2Active, "Single-key settlement disabled: use OracleFacet");
+        // H-1 fix: oracleV2Active guard is now enforced in the onlyOracleAdmin modifier
+        // (single point of enforcement). The duplicate check here has been removed.
+
         // Fix 3 — Fallback oracle guard: prevent settling an event that nobody has joined.
         // An event with zero hedger positions has nothing to resolve and settling it early
         // would allow front-running the pool (settle before any user can participate).
@@ -1139,14 +1176,39 @@ contract BlockFinaXHedgeFacet {
             "Cannot settle: no hedger positions and event has not expired"
         );
 
-        bool triggered = evt.strikeAbove
+        // M-1 fix: enforce settlement timing. The oracle may only settle before expiry if
+        // the submitted price already touches the strike (the event has economically resolved).
+        // After expiry, settlement is always allowed regardless of whether strike was hit.
+        bool alreadyTriggered = evt.strikeAbove
             ? _settlementPrice >= evt.strike
             : _settlementPrice <= evt.strike;
+        require(
+            block.timestamp >= evt.expiryDate || alreadyTriggered,
+            "Too early: event not expired and strike not yet reached"
+        );
+
+        // L-3 fix: reject settlement prices that are wildly implausible to catch
+        // obvious oracle errors (e.g. off-by-one-million-X typos). A price is accepted
+        // only if it falls within [initialRate / 100, initialRate * 100], i.e. within
+        // two orders of magnitude of the rate recorded at event creation. Real FX
+        // rates do not move 100× in any reasonable time horizon.
+        require(
+            _settlementPrice >= evt.initialRate / 100 && _settlementPrice <= evt.initialRate * 100,
+            "Settlement price out of plausible range (must be within 100x of initial rate)"
+        );
+
+        bool triggered = alreadyTriggered;
 
         evt.status = LibAppStorage.HedgeEventStatus.Settled;
         evt.settlementPrice = _settlementPrice;
         evt.triggered = triggered;
         evt.settledAt = block.timestamp;
+
+        // C-1 fix: snapshot totalLiquidity at the moment of settlement. withdrawCapital()
+        // uses this value as the denominator when computing each LP's payout share.
+        // Without the snapshot, the denominator shrinks as LPs withdraw, causing each
+        // subsequent LP to be charged an increasing fraction of the remaining payouts.
+        evt.liquidityAtSettlement = evt.totalLiquidity;
 
         uint256[] storage positionIds = s.hedgeEventPositionIds[_eventId];
         // G001: cache array length to avoid repeated storage reads in the loop.
@@ -1227,6 +1289,13 @@ contract BlockFinaXHedgeFacet {
         pos.claimed = true;
         pos.status = LibAppStorage.HedgePositionStatus.Claimed;
 
+        // C-2 fix: decrement internal reserve tracker before transferring tokens out.
+        if (s.tokenReserves[token] >= netPayout) {
+            s.tokenReserves[token] -= netPayout;
+        } else {
+            s.tokenReserves[token] = 0;
+        }
+
         IERC20(token).safeTransfer(msg.sender, netPayout);
 
         emit PayoutClaimed(_positionId, msg.sender, grossPayout, payoutFee, netPayout);
@@ -1283,10 +1352,19 @@ contract BlockFinaXHedgeFacet {
         address token = _getEventToken(s, evt);
         s.platformFeesByToken[token] += netLpFee;
 
+        // M-5 fix: verify the contract holds sufficient tokens before transferring.
+        // This guards against an edge case where accounting fields (accPremiumPerShare,
+        // platformFeesByToken) could theoretically overstate claimable amounts relative
+        // to the actual on-chain balance (e.g. if a separate facet bug drained tokens).
+        require(s.tokenReserves[token] >= netAmount, "Insufficient contract balance for premium");
+
         // Update rewardDebt and tracking fields before the transfer (CEI).
         dep.rewardDebt = accured;
         dep.premiumsEarned += claimable;
         dep.premiumsClaimed += claimable;
+
+        // C-2 fix: decrement internal reserve tracker before transferring tokens out.
+        s.tokenReserves[token] -= netAmount;
 
         IERC20(token).safeTransfer(msg.sender, netAmount);
 
@@ -1342,18 +1420,38 @@ contract BlockFinaXHedgeFacet {
 
         uint256 withdrawAmount = dep.amount;
 
-        if (evt.triggered && evt.totalMaxPayout > 0 && evt.totalLiquidity > 0) {
-            // Single-step calculation avoids compounding truncation from two divisions.
-            uint256 lpPayoutShare = (evt.totalMaxPayout * dep.amount) / evt.totalLiquidity;
-            if (lpPayoutShare > withdrawAmount) {
-                withdrawAmount = 0;
-            } else {
-                withdrawAmount -= lpPayoutShare;
+        if (evt.triggered && evt.totalMaxPayout > 0) {
+            // C-1 fix: use liquidityAtSettlement (snapshotted at settlement time) instead of
+            // the live totalLiquidity. After settlement, totalLiquidity is unchanged but each
+            // LP withdrawal does not alter it. Using the snapshot ensures every LP's payout
+            // share is computed against the same pool size, regardless of withdrawal order.
+            // For pre-fix events where liquidityAtSettlement was not recorded (= 0), fall back
+            // to totalLiquidity to preserve backward compatibility.
+            uint256 refLiquidity = evt.liquidityAtSettlement > 0
+                ? evt.liquidityAtSettlement
+                : evt.totalLiquidity;
+
+            if (refLiquidity > 0) {
+                // Single-step calculation avoids compounding truncation from two divisions.
+                uint256 lpPayoutShare = (evt.totalMaxPayout * dep.amount) / refLiquidity;
+                if (lpPayoutShare > withdrawAmount) {
+                    withdrawAmount = 0;
+                } else {
+                    withdrawAmount -= lpPayoutShare;
+                }
             }
         }
 
+        address withdrawToken = _getEventToken(s, evt);
+
         if (withdrawAmount > 0) {
-            IERC20(_getEventToken(s, evt)).safeTransfer(msg.sender, withdrawAmount);
+            // C-2 fix: decrement internal reserve tracker before transferring tokens out.
+            if (s.tokenReserves[withdrawToken] >= withdrawAmount) {
+                s.tokenReserves[withdrawToken] -= withdrawAmount;
+            } else {
+                s.tokenReserves[withdrawToken] = 0;
+            }
+            IERC20(withdrawToken).safeTransfer(msg.sender, withdrawAmount);
         }
 
         emit CapitalWithdrawn(_depositId, msg.sender, withdrawAmount);
@@ -1382,7 +1480,16 @@ contract BlockFinaXHedgeFacet {
         uint256 amount = evt.creatorEarnings;
         evt.creatorEarnings = 0;
 
-        IERC20(_getEventToken(s, evt)).safeTransfer(msg.sender, amount);
+        address creatorToken = _getEventToken(s, evt);
+
+        // C-2 fix: decrement internal reserve tracker before transferring tokens out.
+        if (s.tokenReserves[creatorToken] >= amount) {
+            s.tokenReserves[creatorToken] -= amount;
+        } else {
+            s.tokenReserves[creatorToken] = 0;
+        }
+
+        IERC20(creatorToken).safeTransfer(msg.sender, amount);
 
         emit CreatorEarningsWithdrawn(_eventId, msg.sender, amount);
     }
@@ -1672,8 +1779,27 @@ contract BlockFinaXHedgeFacet {
     ) internal {
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
         if (evt.totalActiveShares == 0) return;
-        // Accumulate premium per share; all precision loss is bounded by ACC_PREMIUM_MULTIPLIER.
-        evt.accPremiumPerShare += (_premium * ACC_PREMIUM_MULTIPLIER) / evt.totalActiveShares;
+
+        // H-2 fix: track integer remainder (dust) from the per-share accumulator.
+        // Each call computes accPremiumPerShare += (premium * ACC_MULTIPLIER) / totalActiveShares.
+        // The division discards a remainder of up to (totalActiveShares - 1) units, which is
+        // silently lost under the original implementation. Over many buyProtection() calls
+        // this dust can become material. We accumulate it in evt.premiumDust and distribute
+        // a bonus increment whenever the accumulated dust is >= totalActiveShares (i.e. enough
+        // to add at least 1 unit per share when divided through).
+        uint256 scaledPremium = _premium * ACC_PREMIUM_MULTIPLIER;
+        uint256 increment = scaledPremium / evt.totalActiveShares;
+        uint256 remainder = scaledPremium % evt.totalActiveShares;
+
+        // Accumulate remainder; roll over any full increment's worth of dust.
+        evt.premiumDust += remainder;
+        if (evt.premiumDust >= evt.totalActiveShares) {
+            uint256 bonusIncrements = evt.premiumDust / evt.totalActiveShares;
+            increment += bonusIncrements;
+            evt.premiumDust = evt.premiumDust % evt.totalActiveShares;
+        }
+
+        evt.accPremiumPerShare += increment;
     }
 
     /**

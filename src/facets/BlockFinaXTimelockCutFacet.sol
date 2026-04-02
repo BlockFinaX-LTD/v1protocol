@@ -86,6 +86,21 @@ contract BlockFinaXTimelockCutFacet {
 
         require(ts.proposals[proposalId].eta == 0, "Proposal ID collision: try again");
 
+        // M-2 fix: validate that Add/Replace facets are deployed contracts (have bytecode).
+        // Proposing a cut that points to an EOA or zero address would pass the timelock delay
+        // and then revert at execution time — wasting 48 hours and requiring a re-proposal.
+        // Catching this at proposal time is both cheaper and safer.
+        for (uint256 k; k < _facetCuts.length; k++) {
+            IDiamondCut.FacetCutAction action = _facetCuts[k].action;
+            if (action == IDiamondCut.FacetCutAction.Add || action == IDiamondCut.FacetCutAction.Replace) {
+                address fa = _facetCuts[k].facetAddress;
+                require(fa != address(0), "Facet address is zero");
+                uint256 codeSize;
+                assembly { codeSize := extcodesize(fa) }
+                require(codeSize > 0, "Facet address has no code (not a contract)");
+            }
+        }
+
         Proposal storage p = ts.proposals[proposalId];
         for (uint256 i; i < _facetCuts.length; i++) {
             StoredFacetCut storage sfc = p.facetCuts.push();

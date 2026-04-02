@@ -137,6 +137,22 @@ library LibAppStorage {
         ///      Maintained in deposit() and withdrawCapital(); eliminates the O(n)
         ///      _getTotalShares() loop that previously ran inside deposit().
         uint256 totalActiveShares;
+
+        // ── v6 additions: always append at end to preserve Diamond storage layout ──────────
+
+        /// @dev C-1 fix: snapshot of totalLiquidity taken at settlement time.
+        ///      withdrawCapital() uses this value instead of the live totalLiquidity to compute
+        ///      each LP's proportional payout share. Without the snapshot, LPs who withdraw
+        ///      later (after other LPs have already withdrawn) see a shrinking denominator and
+        ///      are charged a disproportionately large payout share.
+        uint256 liquidityAtSettlement;
+
+        /// @dev H-2 fix: accumulated integer remainder from the per-share premium accumulator.
+        ///      Each buyProtection() call increments accPremiumPerShare by
+        ///      (premium * ACC_PREMIUM_MULTIPLIER) / totalActiveShares; any remainder is dust.
+        ///      Dust is accumulated here and distributed when it exceeds totalActiveShares,
+        ///      ensuring no premium is silently lost to integer truncation.
+        uint256 premiumDust;
     }
 
     /**
@@ -242,6 +258,10 @@ library LibAppStorage {
         uint256 hedgeEventCounter;
 
         /// @dev Total number of hedge events ever created (same as hedgeEventCounter).
+        /// @dev L-1: This field is a legacy duplicate of hedgeEventCounter and was never
+        ///      independently maintained. It cannot be removed without breaking the Diamond
+        ///      storage layout of deployed contracts. getTotalHedgeEvents() reads
+        ///      hedgeEventCounter directly. New code must not write to this field.
         uint256 totalHedgeEvents;
 
         /// @dev All hedger positions, keyed by position ID.
@@ -314,6 +334,13 @@ library LibAppStorage {
         ///      hedgePlatformFeesCollected counter for multi-token accounting.
         ///      hedgePlatformFeesCollected is kept for backward compatibility with existing reads.
         mapping(address => uint256) platformFeesByToken;
+
+        /// @dev C-2 fix: tracks net tokens held by the Diamond for each payment token.
+        ///      Incremented by every safeTransferFrom (tokens flowing in) and decremented by
+        ///      every safeTransfer (tokens flowing out). Used in place of
+        ///      IERC20.balanceOf(address(this)) to prevent donation / re-entrancy attacks
+        ///      where an attacker inflates the on-chain balance to manipulate fee recovery.
+        mapping(address => uint256) tokenReserves;
     }
 
     /**
