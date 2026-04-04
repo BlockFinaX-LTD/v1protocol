@@ -5,7 +5,7 @@ import {LibDiamond} from "./libraries/LibDiamond.sol";
 import {IDiamondCut} from "./interfaces/IDiamondCut.sol";
 import {LibAppStorage} from "./libraries/LibAppStorage.sol";
 
-contract Diamond {
+contract BlockFinaXDiamond {
     constructor(address _contractOwner, address _diamondCutFacet, address _usdcToken) payable {
         require(_contractOwner  != address(0), "Diamond: zero owner");
         require(_diamondCutFacet != address(0), "Diamond: zero cut facet");

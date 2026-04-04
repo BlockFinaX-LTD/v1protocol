@@ -46,31 +46,46 @@ module.exports = {
     }
   },
   etherscan: {
-    // Single Etherscan v2 API key covers Base, BSC, and all Etherscan-family explorers
-    apiKey: process.env.ETHERSCAN_API_KEY || "",
+    // Per-network keys: V2 key for Base/BSC (uses customChains V2 URL), "blockscout" for Lisk
+    apiKey: {
+      base:        process.env.ETHERSCAN_API_KEY || "",
+      baseSepolia: process.env.ETHERSCAN_API_KEY || "",
+      bsc:         process.env.ETHERSCAN_API_KEY || "",
+      bscTestnet:  process.env.ETHERSCAN_API_KEY || "",
+      lisk:        "blockscout",
+      liskSepolia: "blockscout",
+    },
     customChains: [
-      {
-        network: "baseSepolia",
-        chainId: 84532,
-        urls: {
-          apiURL:     "https://api-sepolia.basescan.org/api",
-          browserURL: "https://sepolia.basescan.org"
-        }
-      },
       {
         network: "base",
         chainId: 8453,
         urls: {
-          apiURL:     "https://api.basescan.org/api",
+          apiURL:     "https://api.etherscan.io/v2/api?chainid=8453",
           browserURL: "https://basescan.org"
         }
       },
       {
-        network: "liskSepolia",
-        chainId: 4202,
+        network: "baseSepolia",
+        chainId: 84532,
         urls: {
-          apiURL:     "https://sepolia-blockscout.lisk.com/api",
-          browserURL: "https://sepolia-blockscout.lisk.com"
+          apiURL:     "https://api.etherscan.io/v2/api?chainid=84532",
+          browserURL: "https://sepolia.basescan.org"
+        }
+      },
+      {
+        network: "bsc",
+        chainId: 56,
+        urls: {
+          apiURL:     "https://api.etherscan.io/v2/api?chainid=56",
+          browserURL: "https://bscscan.com"
+        }
+      },
+      {
+        network: "bscTestnet",
+        chainId: 97,
+        urls: {
+          apiURL:     "https://api.etherscan.io/v2/api?chainid=97",
+          browserURL: "https://testnet.bscscan.com"
         }
       },
       {
@@ -79,6 +94,14 @@ module.exports = {
         urls: {
           apiURL:     "https://blockscout.lisk.com/api",
           browserURL: "https://blockscout.lisk.com"
+        }
+      },
+      {
+        network: "liskSepolia",
+        chainId: 4202,
+        urls: {
+          apiURL:     "https://sepolia-blockscout.lisk.com/api",
+          browserURL: "https://sepolia-blockscout.lisk.com"
         }
       }
     ]
