@@ -1,0 +1,31 @@
+{
+  "standard": "EIP-2535 Diamond",
+  "network": "bsc",
+  "chainId": 56,
+  "diamond": "0xaC939C0897981Abc0711ec4e37527F13106180fc",
+  "facets": {
+    "blockFinaXDiamondCut": "0xAEcE90e767E257dE7cd9C6E1e93cEb880575C394",
+    "blockFinaXDiamondLoupe": "0x8dD38f78a34b12f967c635252FB03b2f055988f6",
+    "blockFinaXHedge": "0x94e1436180C4c577D98e769D1830F39f62F0b122",
+    "blockFinaXOracle": "0x090a3cC9A71e2272f6a681C2bA940C71D36c239f"
+  },
+  "config": {
+    "paymentToken": "0x55d398326f99059fF775485246999027B3197955",
+    "paymentTokenSymbol": "USDT",
+    "hedgeFees": {
+      "eventCreationFee": "2000000000000000000",
+      "hedgerFeeRate": "5000",
+      "hedgerPayoutFeeRate": "10000",
+      "lpProfitFeeRate": "10000",
+      "creatorLoyaltyRate": "50000"
+    },
+    "oracleAdmin": "0xef5Bed7c221c85A2c88e3c0223ee45482d6F037d",
+    "oraclesRegistered": [
+      "0x1F038152d5E6F120E26f8F11688cB9Dc27703236",
+      "0x488F6090Ede627cddf3f4f12E46FB5665EBBCcfA",
+      "0x4fA8B101ed6E80F06D3eB2910381ff2901a0cbD3"
+    ]
+  },
+  "deployer": "0xef5Bed7c221c85A2c88e3c0223ee45482d6F037d",
+  "timestamp": "2026-04-06T16:15:50.217Z"
+}

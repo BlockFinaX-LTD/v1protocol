@@ -270,9 +270,11 @@ contract BlockFinaXHedgeFacet {
         uint256 _creatorLoyaltyRate
     ) external onlyOwner {
         // H002: cap individual rates to sensible maxima to prevent misconfiguration.
-        // Creation fee capped at $1,000 (1_000 * 1e6). Percentage rates capped at 10%
-        // (100_000 / 1e6). Creator loyalty capped at 50% of platform fees (500_000 / 1e6).
-        require(_eventCreationFee <= 1_000 * PRECISION, "Creation fee exceeds $1000 cap");
+        // Creation fee capped at $1,000 expressed in the highest-precision token (18 dec).
+        // For 6-dec USDC: max 1_000 * 1e6 = 1e9. For 18-dec USDT: max 1_000 * 1e18 = 1e21.
+        // Using 1_000 * 1e18 as the universal cap — well above any 6-dec USDC fee.
+        require(_eventCreationFee <= 1_000 * 1e18, "Creation fee exceeds $1000 cap");
+        // Percentage rates capped at 10% (100_000 / 1e6). Creator loyalty capped at 50% (500_000 / 1e6).
         require(_hedgerFeeRate <= 100_000, "hedgerFeeRate exceeds 10% cap");
         require(_hedgerPayoutFeeRate <= 100_000, "hedgerPayoutFeeRate exceeds 10% cap");
         require(_lpProfitFeeRate <= 100_000, "lpProfitFeeRate exceeds 10% cap");

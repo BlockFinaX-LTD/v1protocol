@@ -39,13 +39,45 @@ function getSelectors(contract) {
     .map(f => contract.interface.getFunction(f.name).selector);
 }
 
-/** Canonical USDC addresses per chain. */
-const USDC_ADDRESSES = {
-  84532: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // Base Sepolia
-  4202:  "0xf52Ad63619Bf9cFeF510341ac6b4038554399562", // Lisk Sepolia (testnet USDC)
-  8453:  "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // Base Mainnet
-  // Lisk Mainnet — verified at https://blockscout.lisk.com/tokens
-  1135:  "0xF242275d3a6527d877f2c927a82D9b057609cc71",
+/** Payment token per chain (USDC on Lisk/Base, USDT on BSC). */
+const PAYMENT_TOKEN_ADDRESSES = {
+  84532: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // Base Sepolia USDC
+  4202:  "0xf52Ad63619Bf9cFeF510341ac6b4038554399562", // Lisk Sepolia USDC
+  8453:  "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // Base Mainnet USDC
+  1135:  "0xF242275d3a6527d877f2c927a82D9b057609cc71", // Lisk Mainnet USDC
+  56:    "0x55d398326f99059fF775485246999027B3197955", // BSC Mainnet USDT (18 dec)
+  97:    "0x337610d27c682E347C9cD60BD4b3b107C9d34aeB", // BSC Testnet USDT
+};
+
+/**
+ * Per-chain fee initialisation parameters for initializeHedgeFees().
+ * eventCreationFee is in the payment token's native decimals.
+ * Rate fields use PRECISION = 1e6 as denominator (e.g. 5000 = 0.5%).
+ */
+const CHAIN_FEES = {
+  // Default — USDC chains (6 decimals): $25 creation fee
+  default: {
+    eventCreationFee:    25_000_000n,    // $25.00 in 6-dec USDC
+    hedgerFeeRate:        5_000n,        // 0.5%
+    hedgerPayoutFeeRate: 10_000n,        // 1.0%
+    lpProfitFeeRate:     10_000n,        // 1.0%
+    creatorLoyaltyRate:  50_000n,        // 5.0%
+  },
+  // BSC — USDT (18 decimals): $2 creation fee (lower barrier for BSC market)
+  56: {
+    eventCreationFee:    2_000_000_000_000_000_000n, // $2.00 in 18-dec USDT
+    hedgerFeeRate:        5_000n,
+    hedgerPayoutFeeRate: 10_000n,
+    lpProfitFeeRate:     10_000n,
+    creatorLoyaltyRate:  50_000n,
+  },
+  97: {
+    eventCreationFee:    2_000_000_000_000_000_000n,
+    hedgerFeeRate:        5_000n,
+    hedgerPayoutFeeRate: 10_000n,
+    lpProfitFeeRate:     10_000n,
+    creatorLoyaltyRate:  50_000n,
+  },
 };
 
 async function main() {
@@ -68,17 +100,16 @@ async function main() {
     throw new Error("Deployer balance is zero — fund the wallet before deploying.");
   }
 
-  const USDC_ADDRESS = USDC_ADDRESSES[chainId];
-  if (!USDC_ADDRESS || USDC_ADDRESS === "0x") {
+  const USDC_ADDRESS = PAYMENT_TOKEN_ADDRESSES[chainId];
+  if (!USDC_ADDRESS) {
     throw new Error(
-      `No USDC address configured for chain ID ${chainId}.\n` +
-      (chainId === 1135
-        ? "Set USDC_LISK_MAINNET env var to the verified USDC contract address on Lisk Mainnet.\n" +
-          "Check https://blockscout.lisk.com/tokens for the official bridged USDC address."
-        : "Add the USDC address to the USDC_ADDRESSES map in deploy-diamond.js.")
+      `No payment token address configured for chain ID ${chainId}.\n` +
+      `Add it to the PAYMENT_TOKEN_ADDRESSES map in deploy-diamond.js.`
     );
   }
-  console.log("USDC:            ", USDC_ADDRESS, "\n");
+  const fees = CHAIN_FEES[chainId] || CHAIN_FEES.default;
+  const tokenSymbol = chainId === 56 || chainId === 97 ? "USDT" : "USDC";
+  console.log(`${tokenSymbol}:            `, USDC_ADDRESS, "\n");
 
   // ────────────────────────────────────────────────────────────────────────────
   // 1. DiamondCutFacet
@@ -95,7 +126,7 @@ async function main() {
   // 2. Diamond proxy
   // ────────────────────────────────────────────────────────────────────────────
   console.log("Deploying Diamond...");
-  const Diamond = await hre.ethers.getContractFactory("Diamond");
+  const Diamond = await hre.ethers.getContractFactory("BlockFinaXDiamond");
   const diamond = await Diamond.deploy(deployer.address, diamondCutAddress, USDC_ADDRESS);
   await diamond.waitForDeployment();
   const diamondAddress = await diamond.getAddress();
@@ -169,14 +200,14 @@ async function main() {
   console.log("\nInitializing hedge fees...");
   const hedgeViaDiamond = await hre.ethers.getContractAt("BlockFinaXHedgeFacet", diamondAddress);
   const initTx = await hedgeViaDiamond.initializeHedgeFees(
-    25_000_000,   // eventCreationFee  = $25.00 (6 dec USDC)
-    5_000,        // hedgerFeeRate     = 0.5%   (bps ×10 000)
-    10_000,       // hedgerPayoutFeeRate= 1.0%
-    10_000,       // lpProfitFeeRate   = 1.0%
-    50_000        // creatorLoyaltyRate= 5.0%
+    fees.eventCreationFee,
+    fees.hedgerFeeRate,
+    fees.hedgerPayoutFeeRate,
+    fees.lpProfitFeeRate,
+    fees.creatorLoyaltyRate,
   );
   await initTx.wait();
-  console.log("  Fees initialised: $25 creation · 0.5% hedger · 1% payout · 1% LP · 5% creator");
+  console.log(`  Fees initialised: creation=${fees.eventCreationFee} ${tokenSymbol} · hedger=${fees.hedgerFeeRate/10n}bps · payout=${fees.hedgerPayoutFeeRate/10n}bps`);
   await wait(2000);
 
   // ────────────────────────────────────────────────────────────────────────────
@@ -281,13 +312,14 @@ async function main() {
       blockFinaXOracle:       oracleAddress,
     },
     config: {
-      usdcToken: USDC_ADDRESS,
+      paymentToken: USDC_ADDRESS,
+      paymentTokenSymbol: tokenSymbol,
       hedgeFees: {
-        eventCreationFee:    "25000000",
-        hedgerFeeRate:       "5000",
-        hedgerPayoutFeeRate: "10000",
-        lpProfitFeeRate:     "10000",
-        creatorLoyaltyRate:  "50000",
+        eventCreationFee:    fees.eventCreationFee.toString(),
+        hedgerFeeRate:       fees.hedgerFeeRate.toString(),
+        hedgerPayoutFeeRate: fees.hedgerPayoutFeeRate.toString(),
+        lpProfitFeeRate:     fees.lpProfitFeeRate.toString(),
+        creatorLoyaltyRate:  fees.creatorLoyaltyRate.toString(),
       },
       oracleAdmin:          deployer.address,
       oraclesRegistered:    oracleAddresses,
