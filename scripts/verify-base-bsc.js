@@ -94,7 +94,7 @@ async function main() {
   const cutFacetAddress = Object.values(chain.facets)[0]; // first = DiamondCutFacet
   await verify(
     chain.diamond,
-    "src/Diamond.sol:Diamond",
+    "src/Diamond.sol:BlockFinaXDiamond",
     [chain.owner, cutFacetAddress, chain.token]
   );
 
