@@ -180,6 +180,8 @@ contract BlockFinaXHedgeFacet {
 
     /// @notice Emitted when stranded ETH is rescued by the owner.
     event ETHRescued(address indexed to, uint256 amount);
+    /// @notice Emitted when a non-payment ERC20 token is rescued from the Diamond by the owner.
+    event ERC20Rescued(address indexed token, address indexed to, uint256 amount);
 
     /// @notice Emitted when a token is added to or removed from the payment token whitelist.
     event PaymentTokenSet(address indexed token, bool allowed);
@@ -525,6 +527,40 @@ contract BlockFinaXHedgeFacet {
         (bool ok, ) = _to.call{value: balance, gas: 10_000}("");
         require(ok, "ETH transfer failed");
         emit ETHRescued(_to, balance);
+    }
+
+    /**
+     * @notice Sweep any ERC20 token that has been airdropped or mistakenly sent to the
+     *         Diamond contract, forwarding the full balance to `_to`.
+     *
+     * @dev    SECURITY GUARD: rescuing the configured payment token (USDC / USDT) is
+     *         explicitly blocked. All user funds (deposits, premiums, payouts) are
+     *         denominated in the payment token — allowing the owner to sweep it would
+     *         constitute a rug-pull. Scam / airdrop tokens use a different contract
+     *         address, so this function safely removes only those.
+     *
+     *         The nonReentrant modifier prevents re-entrancy from malicious token contracts
+     *         that implement a callback on transfer.
+     *
+     * @param _token ERC20 token contract address to rescue. Must not be the payment token.
+     * @param _to    Recipient address. Cannot be address(0).
+     */
+    function rescueERC20(address _token, address _to) external onlyOwner nonReentrant {
+        require(_to != address(0), "Zero address");
+        require(_token != address(0), "Zero token address");
+
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        // Block rescue of the primary payment token — user funds must stay in the contract.
+        require(_token != s.usdcToken, "Cannot rescue payment token");
+        // Also block any additional whitelisted payment tokens.
+        require(!s.allowedPaymentTokens[_token], "Cannot rescue whitelisted payment token");
+
+        IERC20 token = IERC20(_token);
+        uint256 balance = token.balanceOf(address(this));
+        require(balance > 0, "No tokens to rescue");
+
+        token.safeTransfer(_to, balance);
+        emit ERC20Rescued(_token, _to, balance);
     }
 
     // ============================================================
