@@ -25,8 +25,8 @@ async function main() {
   const cfg = DIAMONDS[netName];
   if (!cfg) throw new Error(`Unsupported network: ${netName}. Use lisk, base, or bsc`);
 
-  const key = process.env.SAFE_OWNER_KEY_1 || process.env.DEPLOYER_PRIVATE_KEY;
-  if (!key) throw new Error("Set SAFE_OWNER_KEY_1 or DEPLOYER_PRIVATE_KEY");
+  const key = process.env.DEPLOYER_PRIVATE_KEY || process.env.SAFE_OWNER_KEY_1;
+  if (!key) throw new Error("Set DEPLOYER_PRIVATE_KEY or SAFE_OWNER_KEY_1");
 
   const signer = new ethers.Wallet(key, ethers.provider);
   console.log(`\nNetwork  : ${netName}`);
