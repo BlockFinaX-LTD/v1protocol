@@ -178,14 +178,14 @@ contract BlockFinaXOracleFacet {
         require(os.isOracle[_oracle], "Not registered");
 
         os.isOracle[_oracle] = false;
-        // G001: cache length; G011: pre-increment.
         uint256 len = os.oracles.length;
-        for (uint256 i = 0; i < len; ++i) {
+        for (uint256 i = 0; i < len;) {
             if (os.oracles[i] == _oracle) {
                 os.oracles[i] = os.oracles[len - 1];
                 os.oracles.pop();
                 break;
             }
+            unchecked { ++i; }
         }
 
         // M-6 fix: after removing an oracle, verify the remaining oracle count still
@@ -228,7 +228,9 @@ contract BlockFinaXOracleFacet {
      */
     function setToleranceBps(uint256 _bps) external onlyOwner {
         LibOracleStorage.OracleStorage storage os = LibOracleStorage.oracleStorage();
-        require(_bps <= 1000, "Max 10% tolerance");
+        // M-3 + M-7 fix: enforce minimum 1 bps (prevents DoS) and maximum 200 bps (2%)
+        // to limit oracle-manipulable settlement skew.
+        require(_bps >= 1 && _bps <= 200, "Tolerance must be 1-200 bps");
         os.toleranceBps = _bps;
         emit OracleConfigUpdated(os.requiredSigners, os.toleranceBps);
     }
@@ -367,41 +369,37 @@ contract BlockFinaXOracleFacet {
         // This avoids over-allocating a `submitterCount`-length array when some entries are stale,
         // which would leave trailing zero slots that could mislead readers of the array.
         uint256 validCount = 0;
-        // G001: submitterCount cached above; G011: pre-increment.
-        for (uint256 i = 0; i < submitterCount; ++i) {
+        // G-L2 + G-L4: single-pass with fixed-size stack array to avoid two loops and heap allocation.
+        uint256[10] memory priceBuffer;
+        for (uint256 i = 0; i < submitterCount;) {
             LibOracleStorage.Submission storage sub =
                 os.submissions[_eventId][submitters[i]];
             if (sub.exists && (block.timestamp - sub.timestamp) <= STALE_THRESHOLD) {
-                ++validCount;
+                priceBuffer[validCount] = sub.price;
+                unchecked { ++validCount; }
             }
+            unchecked { ++i; }
         }
 
         if (validCount < required) return;
 
-        // Pass 2: collect exactly `validCount` valid prices into a correctly-sized array.
+        // Copy into correctly-sized array for median sort.
         uint256[] memory validPrices = new uint256[](validCount);
-        uint256 idx = 0;
-        for (uint256 i = 0; i < submitterCount; ++i) {
-            LibOracleStorage.Submission storage sub =
-                os.submissions[_eventId][submitters[i]];
-            if (sub.exists && (block.timestamp - sub.timestamp) <= STALE_THRESHOLD) {
-                validPrices[idx] = sub.price;
-                ++idx;
-            }
+        for (uint256 i = 0; i < validCount;) {
+            validPrices[i] = priceBuffer[i];
+            unchecked { ++i; }
         }
 
         uint256 minPrice = validPrices[0];
         uint256 maxPrice = validPrices[0];
-        uint256 sum = validPrices[0];
         // Defensive guard: submitRate enforces _price > 0, so minPrice can never be zero,
         // but we assert explicitly to make the invariant clear to auditors.
         require(minPrice > 0, "Zero price in valid submission set");
 
-        // G001: validCount is a stack variable; G011: pre-increment.
-        for (uint256 i = 1; i < validCount; ++i) {
+        for (uint256 i = 1; i < validCount;) {
             if (validPrices[i] < minPrice) minPrice = validPrices[i];
             if (validPrices[i] > maxPrice) maxPrice = validPrices[i];
-            sum += validPrices[i];
+            unchecked { ++i; }
         }
 
         uint256 spread = ((maxPrice - minPrice) * 10000) / minPrice;
@@ -416,7 +414,9 @@ contract BlockFinaXOracleFacet {
             return;
         }
 
-        uint256 agreedPrice = sum / validCount;
+        // M-1 fix: use median instead of arithmetic mean to prevent boundary price manipulation
+        // by a single compromised oracle.
+        uint256 agreedPrice = _median(validPrices, validCount);
 
         emit ConsensusReached(_eventId, agreedPrice, validCount);
 
@@ -426,6 +426,33 @@ contract BlockFinaXOracleFacet {
         _clearSubmissions(_eventId, submitters, os, false);
 
         _settleEvent(_eventId, agreedPrice, s);
+    }
+
+    /**
+     * @dev M-1 fix: compute the median of a price array (sorted in-place via insertion sort).
+     *      For even-length arrays, returns the average of the two middle elements.
+     *      Array is max 10 elements (MAX_ORACLES), so insertion sort is efficient.
+     *
+     * @param prices     The array of valid prices (mutated in-place).
+     * @param count      Number of elements to consider in the array.
+     * @return           The median price.
+     */
+    function _median(uint256[] memory prices, uint256 count) internal pure returns (uint256) {
+        // Insertion sort — O(n²) but n ≤ 10.
+        for (uint256 i = 1; i < count; ++i) {
+            uint256 key = prices[i];
+            uint256 j = i;
+            while (j > 0 && prices[j - 1] > key) {
+                prices[j] = prices[j - 1];
+                --j;
+            }
+            prices[j] = key;
+        }
+        if (count % 2 == 1) {
+            return prices[count / 2];
+        } else {
+            return (prices[count / 2 - 1] + prices[count / 2]) / 2;
+        }
     }
 
     /**
@@ -446,17 +473,14 @@ contract BlockFinaXOracleFacet {
         LibOracleStorage.OracleStorage storage os,
         bool _isDisagreement
     ) internal {
-        // G001: cache length; G011: pre-increment.
         uint256 count = submitters.length;
-        for (uint256 i = 0; i < count; ++i) {
+        for (uint256 i = 0; i < count;) {
             address oracle = submitters[i];
             delete os.submissions[_eventId][oracle];
-            // H-3 fix: only reset the cooldown timestamp when this is NOT a disagreement
-            // clear. On disagreement, preserving lastSubmitTime means the oracle must still
-            // wait for the RESUBMIT_COOLDOWN before submitting again, preventing DoS cycling.
             if (!_isDisagreement) {
                 delete os.lastSubmitTime[_eventId][oracle];
             }
+            unchecked { ++i; }
         }
         delete os.submitters[_eventId];
     }
@@ -499,12 +523,14 @@ contract BlockFinaXOracleFacet {
         evt.liquidityAtSettlement = evt.totalLiquidity;
 
         uint256[] storage positionIds = s.hedgeEventPositionIds[_eventId];
-        // G001: cache array length; G011: pre-increment.
         uint256 posCount = positionIds.length;
-        for (uint256 i = 0; i < posCount; ++i) {
+        for (uint256 i = 0; i < posCount;) {
             LibAppStorage.HedgePosition storage pos =
                 s.hedgePositions[positionIds[i]];
-            if (pos.status != LibAppStorage.HedgePositionStatus.Active) continue;
+            if (pos.status != LibAppStorage.HedgePositionStatus.Active) {
+                unchecked { ++i; }
+                continue;
+            }
 
             if (triggered) {
                 pos.status = LibAppStorage.HedgePositionStatus.Claimable;
@@ -512,6 +538,7 @@ contract BlockFinaXOracleFacet {
                 pos.payoutAmount = 0;
                 pos.status = LibAppStorage.HedgePositionStatus.Expired;
             }
+            unchecked { ++i; }
         }
 
         emit OracleEventSettled(_eventId, _settlementPrice, triggered);
@@ -630,14 +657,14 @@ contract BlockFinaXOracleFacet {
         timestamps = new uint256[](count);
         isStale = new bool[](count);
 
-        // G001: count already cached above; G011: pre-increment.
-        for (uint256 i = 0; i < count; ++i) {
+        for (uint256 i = 0; i < count;) {
             LibOracleStorage.Submission storage sub =
                 os.submissions[_eventId][submitters[i]];
             oracleAddresses[i] = submitters[i];
             prices[i] = sub.price;
             timestamps[i] = sub.timestamp;
             isStale[i] = (block.timestamp - sub.timestamp) > STALE_THRESHOLD;
+            unchecked { ++i; }
         }
     }
 }

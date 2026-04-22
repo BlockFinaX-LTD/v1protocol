@@ -3,6 +3,7 @@ pragma solidity 0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {LibAppStorage} from "../libraries/LibAppStorage.sol";
 import {LibDiamond} from "../libraries/LibDiamond.sol";
 
@@ -405,29 +406,26 @@ contract BlockFinaXHedgeFacet {
      *
      * @param _amount USDC amount to withdraw (6 decimals).
      */
-    function withdrawPlatformFees(uint256 _amount) external onlyOwner nonReentrant {
+    /// @notice Deprecated — use withdrawPlatformFeesByToken(usdcToken, amount) instead.
+    /// @dev Always reverts. Call migrateLegacyPlatformFees() first to migrate pre-v3 balances.
+    function withdrawPlatformFees(uint256) external onlyOwner nonReentrant {
+        revert("Deprecated: use withdrawPlatformFeesByToken(usdcToken, amount)");
+    }
+
+    /**
+     * @notice One-time migration: sync any pre-v3 USDC fees tracked only in
+     *         hedgePlatformFeesCollected into the per-token platformFeesByToken mapping.
+     * @dev    Idempotent — safe to call multiple times; only writes when the per-token
+     *         counter is behind the legacy counter. Must be called once after upgrading
+     *         from a pre-v3 facet to ensure withdrawPlatformFeesByToken() can access
+     *         all accumulated fees.
+     */
+    function migrateLegacyPlatformFees() external onlyOwner {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
-        require(_amount <= s.hedgePlatformFeesCollected, "Exceeds collected fees");
-
-        s.hedgePlatformFeesCollected -= _amount;
-        // Keep per-token counter in sync. Pre-v3 events may not have credited
-        // platformFeesByToken, so floor at zero rather than allowing underflow.
-        if (_amount <= s.platformFeesByToken[s.usdcToken]) {
-            s.platformFeesByToken[s.usdcToken] -= _amount;
-        } else {
-            s.platformFeesByToken[s.usdcToken] = 0;
+        if (s.hedgePlatformFeesCollected > 0 && s.platformFeesByToken[s.usdcToken] < s.hedgePlatformFeesCollected) {
+            s.platformFeesByToken[s.usdcToken] = s.hedgePlatformFeesCollected;
+            emit PlatformFeesWithdrawn(address(0), 0); // signal migration completed
         }
-
-        // C-2 fix: decrement internal reserve tracker before transferring tokens out.
-        if (s.tokenReserves[s.usdcToken] >= _amount) {
-            s.tokenReserves[s.usdcToken] -= _amount;
-        } else {
-            s.tokenReserves[s.usdcToken] = 0;
-        }
-
-        IERC20(s.usdcToken).safeTransfer(msg.sender, _amount);
-
-        emit PlatformFeesWithdrawn(msg.sender, _amount);
     }
 
     /**
@@ -445,7 +443,7 @@ contract BlockFinaXHedgeFacet {
      *
      * @param _eventId The settled event whose unclaimed payouts should be recovered.
      */
-    function recoverExpiredPayouts(uint256 _eventId) external nonReentrant {
+    function recoverExpiredPayouts(uint256 _eventId) external onlyOwner nonReentrant {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
 
@@ -457,13 +455,16 @@ contract BlockFinaXHedgeFacet {
             "Grace period not elapsed (90 days from settlement)"
         );
 
+        // G-L1: early exit before loop if there are no unclaimed payouts.
+        require(evt.totalMaxPayout > evt.totalPayoutClaimed, "No unclaimed payouts to recover");
+
         // Walk all positions and expire any that are still Claimable.
         // This prevents late-claiming hedgers from drawing funds that have already been
         // swept into platform fees, which could drain unrelated contract balances.
         uint256[] storage positionIds = s.hedgeEventPositionIds[_eventId];
         uint256 posCount = positionIds.length;
         uint256 residual = 0;
-        for (uint256 i = 0; i < posCount; ++i) {
+        for (uint256 i = 0; i < posCount;) {
             LibAppStorage.HedgePosition storage pos = s.hedgePositions[positionIds[i]];
             if (
                 pos.status == LibAppStorage.HedgePositionStatus.Claimable && !pos.claimed
@@ -472,6 +473,7 @@ contract BlockFinaXHedgeFacet {
                 pos.payoutAmount = 0;
                 pos.status = LibAppStorage.HedgePositionStatus.Expired;
             }
+            unchecked { ++i; }
         }
 
         require(residual > 0, "No unclaimed payouts to recover");
@@ -579,6 +581,10 @@ contract BlockFinaXHedgeFacet {
      */
     function setAllowedPaymentToken(address _token, bool _allowed) external onlyOwner {
         require(_token != address(0), "Zero address");
+        // M-4 fix: enforce 6-decimal tokens only. All fee constants and minimums assume 6 decimals.
+        if (_allowed) {
+            require(IERC20Metadata(_token).decimals() == 6, "Only 6-decimal tokens supported");
+        }
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         s.allowedPaymentTokens[_token] = _allowed;
         emit PaymentTokenSet(_token, _allowed);
@@ -636,22 +642,15 @@ contract BlockFinaXHedgeFacet {
         require(_amount <= s.platformFeesByToken[_token], "Exceeds available fees for token");
 
         s.platformFeesByToken[_token] -= _amount;
-        // Keep the legacy USDC aggregate counter in sync. Pre-v3 events may not have
-        // credited hedgePlatformFeesCollected for this token, so floor at zero.
-        if (_token == s.usdcToken) {
-            if (_amount <= s.hedgePlatformFeesCollected) {
-                s.hedgePlatformFeesCollected -= _amount;
-            } else {
-                s.hedgePlatformFeesCollected = 0;
-            }
+        // M-8 fix: keep the legacy USDC aggregate counter in sync with strict subtraction.
+        if (_token == s.usdcToken && s.hedgePlatformFeesCollected >= _amount) {
+            s.hedgePlatformFeesCollected -= _amount;
+        } else if (_token == s.usdcToken) {
+            s.hedgePlatformFeesCollected = 0;
         }
 
-        // C-2 fix: decrement internal reserve tracker before transferring tokens out.
-        if (s.tokenReserves[_token] >= _amount) {
-            s.tokenReserves[_token] -= _amount;
-        } else {
-            s.tokenReserves[_token] = 0;
-        }
+        // H-2 fix: direct subtraction — reverts on accounting mismatch instead of silently flooring.
+        s.tokenReserves[_token] -= _amount;
 
         IERC20(_token).safeTransfer(msg.sender, _amount);
         emit PlatformFeesByTokenWithdrawn(_token, msg.sender, _amount);
@@ -729,7 +728,7 @@ contract BlockFinaXHedgeFacet {
      * @param _params See {CreateEventParams}.
      * @return eventId The ID of the newly created hedge event.
      */
-    function createEvent(CreateEventParams memory _params)
+    function createEvent(CreateEventParams calldata _params)
         external
         nonReentrant
         whenNotPaused
@@ -789,7 +788,10 @@ contract BlockFinaXHedgeFacet {
 
         // --- Effects ---
         uint256 creationFee = s.hedgeFeeConfig.eventCreationFee;
-        s.hedgePlatformFeesCollected += creationFee;
+        // G-M5: only write legacy counter for USDC events.
+        if (token == s.usdcToken) {
+            s.hedgePlatformFeesCollected += creationFee;
+        }
         s.platformFeesByToken[token] += creationFee;
 
         uint256 eventId = ++s.hedgeEventCounter;
@@ -824,7 +826,7 @@ contract BlockFinaXHedgeFacet {
     function _initHedgeEvent(
         LibAppStorage.AppStorage storage s,
         uint256 eventId,
-        CreateEventParams memory _params,
+        CreateEventParams calldata _params,
         address _resolvedToken
     ) internal {
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[eventId];
@@ -997,8 +999,10 @@ contract BlockFinaXHedgeFacet {
         require(evt.id > 0, "Event not found");
         require(evt.status == LibAppStorage.HedgeEventStatus.Open, "Event not open");
         require(_amount >= 10 * PRECISION, "Min deposit: 10 USDC");
+        // G-M3: cache storage ref to avoid repeated mapping hash.
+        uint256[] storage eventDepositIds = s.hedgeEventDepositIds[_eventId];
         require(
-            s.hedgeEventDepositIds[_eventId].length < MAX_DEPOSITS_PER_EVENT,
+            eventDepositIds.length < MAX_DEPOSITS_PER_EVENT,
             "Max LP deposits reached for this event"
         );
 
@@ -1039,7 +1043,7 @@ contract BlockFinaXHedgeFacet {
         // LP cannot claim premiums that were distributed before they joined.
         dep.rewardDebt = (shares * evt.accPremiumPerShare) / ACC_PREMIUM_MULTIPLIER;
 
-        s.hedgeEventDepositIds[_eventId].push(depositId);
+        eventDepositIds.push(depositId);
         s.lpDepositIds[msg.sender].push(depositId);
 
         // --- Interactions ---
@@ -1104,8 +1108,10 @@ contract BlockFinaXHedgeFacet {
         require(evt.poolOpen, "Pool not open for hedging");
         require(block.timestamp < evt.expiryDate, "Event expired");
         require(_notional >= 10 * PRECISION, "Min notional: 10 USDC");
+        // G-M3: cache storage ref to avoid repeated mapping hash.
+        uint256[] storage eventPositionIds = s.hedgeEventPositionIds[_eventId];
         require(
-            s.hedgeEventPositionIds[_eventId].length < MAX_POSITIONS_PER_EVENT,
+            eventPositionIds.length < MAX_POSITIONS_PER_EVENT,
             "Max positions reached for this event"
         );
 
@@ -1145,7 +1151,7 @@ contract BlockFinaXHedgeFacet {
         pos.status = LibAppStorage.HedgePositionStatus.Active;
         pos.createdAt = block.timestamp;
 
-        s.hedgeEventPositionIds[_eventId].push(positionId);
+        eventPositionIds.push(positionId);
         s.hedgerPositionIds[msg.sender].push(positionId);
 
         _distributePremiumToLps(s, _eventId, premium);
@@ -1153,9 +1159,12 @@ contract BlockFinaXHedgeFacet {
         uint256 creatorReward = (platformFee * creatorLoyaltyRate) / PRECISION;
         evt.creatorEarnings += creatorReward;
         uint256 netPlatformFee = platformFee - creatorReward;
-        s.hedgePlatformFeesCollected += netPlatformFee;
 
         address token = _getEventToken(s, evt);
+        // G-M5: only write legacy counter for USDC events.
+        if (token == s.usdcToken) {
+            s.hedgePlatformFeesCollected += netPlatformFee;
+        }
         s.platformFeesByToken[token] += netPlatformFee;
 
         // --- Interactions ---
@@ -1220,8 +1229,9 @@ contract BlockFinaXHedgeFacet {
         bool alreadyTriggered = evt.strikeAbove
             ? _settlementPrice >= evt.strike
             : _settlementPrice <= evt.strike;
+        // G-M1: short-circuit on alreadyTriggered to skip expiryDate SLOAD when triggered.
         require(
-            block.timestamp >= evt.expiryDate || alreadyTriggered,
+            alreadyTriggered || block.timestamp >= evt.expiryDate,
             "Too early: event not expired and strike not yet reached"
         );
 
@@ -1251,9 +1261,12 @@ contract BlockFinaXHedgeFacet {
         uint256[] storage positionIds = s.hedgeEventPositionIds[_eventId];
         // G001: cache array length to avoid repeated storage reads in the loop.
         uint256 positionCount = positionIds.length;
-        for (uint256 i = 0; i < positionCount; ++i) {  // G011: pre-increment
+        for (uint256 i = 0; i < positionCount;) {
             LibAppStorage.HedgePosition storage pos = s.hedgePositions[positionIds[i]];
-            if (pos.status != LibAppStorage.HedgePositionStatus.Active) continue;
+            if (pos.status != LibAppStorage.HedgePositionStatus.Active) {
+                unchecked { ++i; }
+                continue;
+            }
 
             if (triggered) {
                 pos.status = LibAppStorage.HedgePositionStatus.Claimable;
@@ -1261,6 +1274,7 @@ contract BlockFinaXHedgeFacet {
                 pos.payoutAmount = 0;
                 pos.status = LibAppStorage.HedgePositionStatus.Expired;
             }
+            unchecked { ++i; }
         }
 
         emit EventSettled(_eventId, _settlementPrice, triggered);
@@ -1306,9 +1320,12 @@ contract BlockFinaXHedgeFacet {
         uint256 creatorReward = (payoutFee * creatorLoyaltyRate) / PRECISION;
         evt.creatorEarnings += creatorReward;
         uint256 netPayoutFee = payoutFee - creatorReward;
-        s.hedgePlatformFeesCollected += netPayoutFee;
 
         address token = _getEventToken(s, evt);
+        // G-M5: only write legacy counter for USDC events.
+        if (token == s.usdcToken) {
+            s.hedgePlatformFeesCollected += netPayoutFee;
+        }
         s.platformFeesByToken[token] += netPayoutFee;
 
         // Track total tokens actually paid out for this event.
@@ -1327,12 +1344,8 @@ contract BlockFinaXHedgeFacet {
         pos.claimed = true;
         pos.status = LibAppStorage.HedgePositionStatus.Claimed;
 
-        // C-2 fix: decrement internal reserve tracker before transferring tokens out.
-        if (s.tokenReserves[token] >= netPayout) {
-            s.tokenReserves[token] -= netPayout;
-        } else {
-            s.tokenReserves[token] = 0;
-        }
+        // H-2 fix: direct subtraction — reverts on accounting mismatch instead of silently flooring.
+        s.tokenReserves[token] -= netPayout;
 
         IERC20(token).safeTransfer(msg.sender, netPayout);
 
@@ -1385,9 +1398,12 @@ contract BlockFinaXHedgeFacet {
         uint256 creatorReward = (lpFee * creatorLoyaltyRate) / PRECISION;
         evt.creatorEarnings += creatorReward;
         uint256 netLpFee = lpFee - creatorReward;
-        s.hedgePlatformFeesCollected += netLpFee;
 
         address token = _getEventToken(s, evt);
+        // G-M5: only write legacy counter for USDC events.
+        if (token == s.usdcToken) {
+            s.hedgePlatformFeesCollected += netLpFee;
+        }
         s.platformFeesByToken[token] += netLpFee;
 
         // M-5 fix: verify the contract holds sufficient tokens before transferring.
@@ -1483,12 +1499,8 @@ contract BlockFinaXHedgeFacet {
         address withdrawToken = _getEventToken(s, evt);
 
         if (withdrawAmount > 0) {
-            // C-2 fix: decrement internal reserve tracker before transferring tokens out.
-            if (s.tokenReserves[withdrawToken] >= withdrawAmount) {
-                s.tokenReserves[withdrawToken] -= withdrawAmount;
-            } else {
-                s.tokenReserves[withdrawToken] = 0;
-            }
+            // H-2 fix: direct subtraction — reverts on accounting mismatch instead of silently flooring.
+            s.tokenReserves[withdrawToken] -= withdrawAmount;
             IERC20(withdrawToken).safeTransfer(msg.sender, withdrawAmount);
         }
 
@@ -1520,12 +1532,8 @@ contract BlockFinaXHedgeFacet {
 
         address creatorToken = _getEventToken(s, evt);
 
-        // C-2 fix: decrement internal reserve tracker before transferring tokens out.
-        if (s.tokenReserves[creatorToken] >= amount) {
-            s.tokenReserves[creatorToken] -= amount;
-        } else {
-            s.tokenReserves[creatorToken] = 0;
-        }
+        // H-2 fix: direct subtraction — reverts on accounting mismatch instead of silently flooring.
+        s.tokenReserves[creatorToken] -= amount;
 
         IERC20(creatorToken).safeTransfer(msg.sender, amount);
 
@@ -1816,26 +1824,20 @@ contract BlockFinaXHedgeFacet {
         uint256 _premium
     ) internal {
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
-        if (evt.totalActiveShares == 0) return;
+        // G-H4: cache totalActiveShares and premiumDust to avoid repeated SLOADs.
+        uint256 totalShares = evt.totalActiveShares;
+        if (totalShares == 0) return;
 
-        // H-2 fix: track integer remainder (dust) from the per-share accumulator.
-        // Each call computes accPremiumPerShare += (premium * ACC_MULTIPLIER) / totalActiveShares.
-        // The division discards a remainder of up to (totalActiveShares - 1) units, which is
-        // silently lost under the original implementation. Over many buyProtection() calls
-        // this dust can become material. We accumulate it in evt.premiumDust and distribute
-        // a bonus increment whenever the accumulated dust is >= totalActiveShares (i.e. enough
-        // to add at least 1 unit per share when divided through).
         uint256 scaledPremium = _premium * ACC_PREMIUM_MULTIPLIER;
-        uint256 increment = scaledPremium / evt.totalActiveShares;
-        uint256 remainder = scaledPremium % evt.totalActiveShares;
+        uint256 increment = scaledPremium / totalShares;
+        uint256 dust = evt.premiumDust + (scaledPremium % totalShares);
 
-        // Accumulate remainder; roll over any full increment's worth of dust.
-        evt.premiumDust += remainder;
-        if (evt.premiumDust >= evt.totalActiveShares) {
-            uint256 bonusIncrements = evt.premiumDust / evt.totalActiveShares;
-            increment += bonusIncrements;
-            evt.premiumDust = evt.premiumDust % evt.totalActiveShares;
+        // Roll over any full increment's worth of accumulated dust.
+        if (dust >= totalShares) {
+            increment += dust / totalShares;
+            dust %= totalShares;
         }
+        evt.premiumDust = dust;
 
         evt.accPremiumPerShare += increment;
     }
