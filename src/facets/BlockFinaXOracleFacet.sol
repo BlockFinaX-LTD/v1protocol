@@ -498,21 +498,53 @@ contract BlockFinaXOracleFacet {
         // Mirrors the same fix applied in HedgeFacet.settleEvent().
         evt.liquidityAtSettlement = evt.totalLiquidity;
 
+        // v7 range product: mirror HedgeFacet.settleEvent() exactly so consensus settlement
+        // and single-key settlement produce identical position state. See HedgeFacet for the
+        // commentary on the geometry.
+        uint256 effectivePriceMove = 0;
+        if (triggered && evt.payoutCap != 0) {
+            uint256 effectiveRate;
+            if (evt.strikeAbove) {
+                effectiveRate = _settlementPrice >= evt.payoutCap ? evt.payoutCap : _settlementPrice;
+                effectivePriceMove = effectiveRate - evt.strike;
+            } else {
+                effectiveRate = _settlementPrice <= evt.payoutCap ? evt.payoutCap : _settlementPrice;
+                effectivePriceMove = evt.strike - effectiveRate;
+            }
+        }
+
         uint256[] storage positionIds = s.hedgeEventPositionIds[_eventId];
         // G001: cache array length; G011: pre-increment.
         uint256 posCount = positionIds.length;
+        uint256 totalActualPayout = 0;
         for (uint256 i = 0; i < posCount; ++i) {
             LibAppStorage.HedgePosition storage pos =
                 s.hedgePositions[positionIds[i]];
             if (pos.status != LibAppStorage.HedgePositionStatus.Active) continue;
 
-            if (triggered) {
-                pos.status = LibAppStorage.HedgePositionStatus.Claimable;
-            } else {
+            if (!triggered) {
                 pos.payoutAmount = 0;
+                pos.status = LibAppStorage.HedgePositionStatus.Expired;
+                continue;
+            }
+
+            uint256 actualPayout;
+            if (evt.payoutCap == 0) {
+                actualPayout = pos.payoutAmount; // legacy
+            } else {
+                actualPayout = (pos.notional * effectivePriceMove) / evt.initialRate;
+            }
+
+            pos.payoutAmount = actualPayout;
+            if (actualPayout > 0) {
+                pos.status = LibAppStorage.HedgePositionStatus.Claimable;
+                totalActualPayout += actualPayout;
+            } else {
                 pos.status = LibAppStorage.HedgePositionStatus.Expired;
             }
         }
+
+        evt.totalMaxPayout = totalActualPayout;
 
         emit OracleEventSettled(_eventId, _settlementPrice, triggered);
     }

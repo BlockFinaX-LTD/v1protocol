@@ -153,6 +153,32 @@ library LibAppStorage {
         ///      Dust is accumulated here and distributed when it exceeds totalActiveShares,
         ///      ensuring no premium is silently lost to integer truncation.
         uint256 premiumDust;
+
+        // ── v7 additions: range-based payout product (call/put spread) ─────────────────────
+        // Always append at end to preserve Diamond storage layout for existing deployments.
+
+        /// @dev Far end of the payout range. Together with `strike`, defines a continuous
+        ///      payout zone instead of a single trigger point.
+        ///
+        ///      Geometry by direction:
+        ///        strikeAbove = true  (upward hedge):
+        ///            initialRate < strike < payoutCap
+        ///            Payout begins above `strike`, scales linearly with the move,
+        ///            and is capped when settlement reaches `payoutCap`.
+        ///        strikeAbove = false (downward hedge):
+        ///            payoutCap < strike < initialRate
+        ///            Payout begins below `strike`, scales linearly with the move,
+        ///            and is capped when settlement reaches `payoutCap`.
+        ///
+        ///      Per-notional max payout = |payoutCap - strike| / initialRate.
+        ///      Capped at 10x via createEvent() validation, same spirit as the
+        ///      pre-v7 priceDelta cap.
+        ///
+        ///      A value of 0 means "single-strike legacy event" (pre-v7); the settlement
+        ///      and buy paths fall back to the original digital-option formula in that case.
+        ///      No live events exist at v7 cut time, so the legacy branch is essentially
+        ///      dead code retained only for forward-compatibility safety.
+        uint256 payoutCap;
     }
 
     /**
@@ -164,8 +190,15 @@ library LibAppStorage {
      * @param notional        Coverage amount in USDC (6 decimals).
      * @param premiumPaid     Premium paid by the hedger at buyProtection() (USDC, 6 decimals).
      * @param platformFeePaid Platform fee paid by the hedger at buyProtection() (USDC, 6 decimals).
-     * @param payoutAmount    Predetermined payout if the event triggers (USDC, 6 decimals).
-     *                        Set to 0 at settlement if the event did not trigger.
+     * @param payoutAmount    Reserved/actual payout in payment-token units (6 decimals).
+     *                        At buyProtection() this is set to the WORST-CASE payout (settlement
+     *                        reaching the cap end of the range) so the pool can reserve enough
+     *                        liquidity for the position.
+     *                        At settlement settleEvent() overwrites this with the ACTUAL payout
+     *                        based on where the settlement price lands within the range. Set to
+     *                        0 if the event did not trigger.
+     *                        For pre-v7 single-strike events (event.payoutCap == 0) the buy-time
+     *                        and settlement-time values coincide.
      * @param status          Current lifecycle status of this position.
      * @param claimed         Whether claimPayout() has been successfully called.
      * @param createdAt       Unix timestamp of position creation.

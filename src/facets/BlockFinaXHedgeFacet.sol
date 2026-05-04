@@ -683,11 +683,17 @@ contract BlockFinaXHedgeFacet {
     // ============================================================
 
     /**
-     * @notice Parameters for creating a new hedge event.
+     * @notice Parameters for creating a new hedge event (v7 range product).
      *
      * @param name            Human-readable label shown in the UI.
      * @param underlying      Currency pair identifier, e.g. "USD/GHS" or "USD/NGN".
-     * @param strike          Trigger price in 6-decimal units (same scale as oracle prices).
+     * @param strike          Lower edge of the payout range (the "entry" threshold).
+     *                        Above the initial rate for upward hedges, below for downward.
+     *                        Payouts begin once the settlement price crosses this level.
+     * @param payoutCap       Far edge of the payout range (the cap). Above strike for upward
+     *                        hedges, below strike for downward. Settlement prices beyond this
+     *                        level produce the same maximum payout.
+     *                        Set to 0 for legacy single-strike behaviour (pre-v7 events only).
      * @param premiumRate     Premium as a fraction of notional. Uses PRECISION as denominator.
      *                        E.g. 25000 = 2.5%. Maximum = PRECISION (100%).
      * @param expiryDate      Unix timestamp at which the event expires. Must be in the future
@@ -695,10 +701,10 @@ contract BlockFinaXHedgeFacet {
      * @param allowExternalLp Whether wallets other than the creator can call deposit().
      * @param initialLiquidity USDC amount for the creator's first deposit (min 10 USDC, 6 decimals).
      * @param initialRate     Current market rate at event creation time (6 decimals).
-     *                        Used to calculate predetermined payouts at buyProtection() time.
+     *                        Used to calculate per-notional payouts at settlement time.
      * @param strikeAbove     Direction of the hedge.
-     *                        true  = hedger wins if price rises to or above strike (USD weakens).
-     *                        false = hedger wins if price falls to or below strike (USD strengthens).
+     *                        true  = upward hedge (USD weakens). strike > initialRate, payoutCap > strike.
+     *                        false = downward hedge (USD strengthens). strike < initialRate, payoutCap < strike.
      * @param paymentToken    ERC-20 stablecoin to use for all payments in this event.
      *                        Must be whitelisted via setAllowedPaymentToken(). Pass address(0)
      *                        to use the default usdcToken (always accepted, no whitelist check).
@@ -707,6 +713,7 @@ contract BlockFinaXHedgeFacet {
         string name;
         string underlying;
         uint256 strike;
+        uint256 payoutCap;
         uint256 premiumRate;
         uint256 expiryDate;
         bool allowExternalLp;
@@ -753,29 +760,64 @@ contract BlockFinaXHedgeFacet {
         );
         require(_params.initialLiquidity >= 10 * PRECISION, "Min initial liquidity: 10 USDC");
         require(_params.initialRate > 0, "Initial rate must be > 0");
+        // payoutCap selects the product shape:
+        //   payoutCap == 0  → legacy single-strike (digital) event. Payout is the fixed
+        //                     strike-vs-initialRate gap × notional, paid in full if triggered.
+        //   payoutCap > 0   → v7 range (call/put-spread) event. Payout scales linearly between
+        //                     strike and payoutCap, capped at the cap end.
+        // Both shapes are supported simultaneously — the buyProtection() and settleEvent()
+        // paths branch on evt.payoutCap to apply the correct math. Storage layout is identical
+        // in both cases, so the choice is purely a creator-facing configuration.
         if (_params.strikeAbove) {
             require(
                 _params.strike > _params.initialRate,
                 "Strike must be above current rate for upward hedge"
             );
+            if (_params.payoutCap > 0) {
+                require(
+                    _params.payoutCap > _params.strike,
+                    "payoutCap must be above strike for upward hedge"
+                );
+            }
         } else {
             require(
                 _params.strike < _params.initialRate,
                 "Strike must be below current rate for downward hedge"
             );
+            if (_params.payoutCap > 0) {
+                require(
+                    _params.payoutCap < _params.strike,
+                    "payoutCap must be below strike for downward hedge"
+                );
+            }
         }
-        // M-02 fix: cap priceDelta to prevent an adversarially misconfigured event from
-        // draining an entire pool on a single position. A delta > 10× initialRate would
-        // make every payout > 10× notional — no real FX pair moves that far.
-        // This limits predeterminedPayout to at most 10× _notional per buyProtection().
+        // M-02 fix: cap the maximum per-notional payout at 10× to prevent an adversarially
+        // misconfigured event from draining the pool with a single position. The thing being
+        // capped depends on product shape:
+        //   Range mode (payoutCap > 0)       : cap the WIDTH of the payout range (|payoutCap - strike|).
+        //   Single-strike mode (payoutCap=0) : cap the strike-to-spot gap (|strike - initialRate|),
+        //                                      which is the original M-02 form for digital events.
+        // In both cases the result limits predeterminedPayout to ≤ 10× notional, the same
+        // economic invariant — the formulas just measure "max move" differently per shape.
         {
-            uint256 priceDelta = _params.strikeAbove
-                ? _params.strike - _params.initialRate
-                : _params.initialRate - _params.strike;
-            require(
-                priceDelta <= _params.initialRate * 10,
-                "Strike too far from initial rate: max price delta is 10x initialRate"
-            );
+            uint256 maxPriceMove;
+            if (_params.payoutCap > 0) {
+                maxPriceMove = _params.strikeAbove
+                    ? _params.payoutCap - _params.strike
+                    : _params.strike - _params.payoutCap;
+                require(
+                    maxPriceMove <= _params.initialRate * 10,
+                    "Payout range too wide: max payout per notional is 10x"
+                );
+            } else {
+                maxPriceMove = _params.strikeAbove
+                    ? _params.strike - _params.initialRate
+                    : _params.initialRate - _params.strike;
+                require(
+                    maxPriceMove <= _params.initialRate * 10,
+                    "Strike too far from initial rate: max payout per notional is 10x"
+                );
+            }
         }
 
         // Resolve and validate payment token.
@@ -842,6 +884,7 @@ contract BlockFinaXHedgeFacet {
         evt.lpCount = 1;
         evt.initialRate = _params.initialRate;
         evt.strikeAbove = _params.strikeAbove;
+        evt.payoutCap = _params.payoutCap;
         evt.createdAt = block.timestamp;
         // Store the resolved token. For USDC events this is s.usdcToken; zero address is
         // never stored here — the resolution already happened in createEvent().
@@ -1109,10 +1152,25 @@ contract BlockFinaXHedgeFacet {
             "Max positions reached for this event"
         );
 
-        uint256 priceDelta = evt.strikeAbove
-            ? evt.strike - evt.initialRate
-            : evt.initialRate - evt.strike;
-        uint256 predeterminedPayout = (_notional * priceDelta) / evt.initialRate;
+        // v7 range product: reserve the WORST-CASE payout (settlement reaching the cap)
+        // for solvency. The actual payout is computed at settlement based on where the
+        // settlement price lands within the range; it can be anywhere in [0, predetermined].
+        // Pre-v7 (legacy single-strike) events have payoutCap == 0 and fall back to the
+        // original strike-vs-initialRate gap. No live events exist at this gap so the
+        // legacy branch is dead code, but kept for any historical replay scenarios.
+        uint256 maxPriceMove;
+        if (evt.payoutCap == 0) {
+            // Legacy single-strike (pre-v7).
+            maxPriceMove = evt.strikeAbove
+                ? evt.strike - evt.initialRate
+                : evt.initialRate - evt.strike;
+        } else {
+            // v7 range product — width of the payout zone.
+            maxPriceMove = evt.strikeAbove
+                ? evt.payoutCap - evt.strike
+                : evt.strike - evt.payoutCap;
+        }
+        uint256 predeterminedPayout = (_notional * maxPriceMove) / evt.initialRate;
 
         uint256 availableLiquidity = evt.totalLiquidity - evt.totalMaxPayout;
         require(predeterminedPayout <= availableLiquidity, "Insufficient pool liquidity for payout");
@@ -1248,20 +1306,70 @@ contract BlockFinaXHedgeFacet {
         // subsequent LP to be charged an increasing fraction of the remaining payouts.
         evt.liquidityAtSettlement = evt.totalLiquidity;
 
+        // v7 range product: compute the per-notional payout factor ONCE here, using the
+        // event-level strike, payoutCap, and settlement price. Each position then scales
+        // it by its own notional. This collapses the per-position computation to a single
+        // multiplication inside the loop, keeping settlement gas cost essentially the same
+        // as the legacy single-strike version.
+        //
+        // Geometry (when triggered):
+        //   upward   : effective = min(settlement, payoutCap), move = effective - strike
+        //   downward : effective = max(settlement, payoutCap), move = strike - effective
+        //
+        // Pre-v7 events (payoutCap == 0) fall back to the original digital behaviour:
+        // every triggered position gets its full reserved payoutAmount.
+        uint256 effectivePriceMove = 0;
+        if (triggered && evt.payoutCap != 0) {
+            uint256 effectiveRate;
+            if (evt.strikeAbove) {
+                effectiveRate = _settlementPrice >= evt.payoutCap ? evt.payoutCap : _settlementPrice;
+                effectivePriceMove = effectiveRate - evt.strike;
+            } else {
+                effectiveRate = _settlementPrice <= evt.payoutCap ? evt.payoutCap : _settlementPrice;
+                effectivePriceMove = evt.strike - effectiveRate;
+            }
+        }
+
         uint256[] storage positionIds = s.hedgeEventPositionIds[_eventId];
         // G001: cache array length to avoid repeated storage reads in the loop.
         uint256 positionCount = positionIds.length;
+        // v7: track the actual aggregate payout so we can refresh totalMaxPayout to the
+        // realised reservation. LPs withdrawing later then absorb the actual loss, not the
+        // worst-case reservation that was sized at buy time.
+        uint256 totalActualPayout = 0;
         for (uint256 i = 0; i < positionCount; ++i) {  // G011: pre-increment
             LibAppStorage.HedgePosition storage pos = s.hedgePositions[positionIds[i]];
             if (pos.status != LibAppStorage.HedgePositionStatus.Active) continue;
 
-            if (triggered) {
-                pos.status = LibAppStorage.HedgePositionStatus.Claimable;
-            } else {
+            if (!triggered) {
                 pos.payoutAmount = 0;
+                pos.status = LibAppStorage.HedgePositionStatus.Expired;
+                continue;
+            }
+
+            // Triggered branch.
+            uint256 actualPayout;
+            if (evt.payoutCap == 0) {
+                // Legacy single-strike: reserved payout was the actual payout.
+                actualPayout = pos.payoutAmount;
+            } else {
+                // v7 range: scale per-notional move by this position's notional.
+                actualPayout = (pos.notional * effectivePriceMove) / evt.initialRate;
+            }
+
+            pos.payoutAmount = actualPayout;
+            if (actualPayout > 0) {
+                pos.status = LibAppStorage.HedgePositionStatus.Claimable;
+                totalActualPayout += actualPayout;
+            } else {
+                // Edge case: triggered exactly at strike, zero range move => zero payout.
                 pos.status = LibAppStorage.HedgePositionStatus.Expired;
             }
         }
+
+        // v7: refresh totalMaxPayout to the realised aggregate so withdrawCapital()
+        // computes LP loss share against actual payouts, not the buy-time reservation.
+        evt.totalMaxPayout = totalActualPayout;
 
         emit EventSettled(_eventId, _settlementPrice, triggered);
     }
@@ -1314,15 +1422,24 @@ contract BlockFinaXHedgeFacet {
         // Track total tokens actually paid out for this event.
         evt.totalPayoutClaimed += grossPayout;
 
-        // Reduce the reserved payout pool so that LPs who call withdrawCapital() after some
-        // hedgers have already claimed are not penalised for payouts that have already left
-        // the contract. Without this, totalMaxPayout stays at its peak value forever and
-        // LPs subsidise unclaimed amounts even after the hedger has been paid.
-        if (evt.totalMaxPayout >= grossPayout) {
-            evt.totalMaxPayout -= grossPayout;
-        } else {
-            evt.totalMaxPayout = 0; // underflow guard; should not occur in correct operation
-        }
+        // v7 fix: do NOT decrement totalMaxPayout here. The previous decrement created a
+        // path-dependence bug:
+        //
+        //   if hedger claimed BEFORE LP withdrew, totalMaxPayout dropped to 0 and the LP
+        //   withdraw branch `if (triggered && totalMaxPayout > 0)` skipped the loss-share
+        //   deduction → LP received their full deposit back even though the pool had
+        //   already paid out to the hedger → underflow / insolvency.
+        //
+        // The withdrawCapital() comment was always correct: the LP loss share denominator
+        // should be the FULL aggregate payout obligation set at settlement, regardless of
+        // which hedgers have already claimed. Path-independence: LP-first or hedger-first
+        // produces identical pool conservation. Unclaimed reservations after the 90-day
+        // grace period are swept to platform fees by recoverExpiredPayouts(), which uses
+        // its own per-position residual computation and does not depend on this counter
+        // staying current.
+        //
+        // totalPayoutClaimed (just incremented above) is the running record of how much
+        // has actually flowed out — use that field for any "how much paid so far" reads.
 
         pos.claimed = true;
         pos.status = LibAppStorage.HedgePositionStatus.Claimed;
@@ -1573,6 +1690,68 @@ contract BlockFinaXHedgeFacet {
             evt.strike, evt.premiumRate, evt.expiryDate, evt.status,
             evt.poolOpen, evt.allowExternalLp, evt.initialRate, evt.strikeAbove
         );
+    }
+
+    /**
+     * @notice Get the v7 range geometry of a hedge event.
+     * @dev    Returns 0 for `payoutCap` on legacy single-strike events. Frontends should
+     *         treat `payoutCap == 0` as "this event is a digital, render single-strike UI".
+     * @param _eventId The event ID to query.
+     * @return strike       Lower edge of the payout zone (entry threshold).
+     * @return payoutCap    Far edge of the payout zone (cap). Zero on legacy events.
+     * @return initialRate  Spot rate at event creation (6 decimals).
+     * @return strikeAbove  true = upward hedge; false = downward hedge.
+     */
+    function getHedgeEventRange(uint256 _eventId)
+        external
+        view
+        returns (uint256 strike, uint256 payoutCap, uint256 initialRate, bool strikeAbove)
+    {
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
+        return (evt.strike, evt.payoutCap, evt.initialRate, evt.strikeAbove);
+    }
+
+    /**
+     * @notice Quote the actual payout a position WOULD receive at a given hypothetical
+     *         settlement price, without modifying state. Useful for frontend "what-if"
+     *         displays and underwriter risk dashboards.
+     *
+     *         Mirrors the math in settleEvent() exactly. Returns 0 for not-triggered prices.
+     *
+     * @param _eventId        The event to quote against.
+     * @param _hypoSettlement A hypothetical settlement price (6 decimals).
+     * @param _notional       Notional amount to quote (6 decimals).
+     * @return payout         Computed payout in payment-token units (6 decimals).
+     */
+    function quoteRangePayout(uint256 _eventId, uint256 _hypoSettlement, uint256 _notional)
+        external
+        view
+        returns (uint256 payout)
+    {
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
+        if (evt.id == 0 || _hypoSettlement == 0 || _notional == 0) return 0;
+
+        bool triggered = evt.strikeAbove
+            ? _hypoSettlement >= evt.strike
+            : _hypoSettlement <= evt.strike;
+        if (!triggered) return 0;
+
+        uint256 priceMove;
+        if (evt.payoutCap == 0) {
+            // Legacy single-strike: full predetermined gap.
+            priceMove = evt.strikeAbove
+                ? evt.strike - evt.initialRate
+                : evt.initialRate - evt.strike;
+        } else if (evt.strikeAbove) {
+            uint256 effective = _hypoSettlement >= evt.payoutCap ? evt.payoutCap : _hypoSettlement;
+            priceMove = effective - evt.strike;
+        } else {
+            uint256 effective = _hypoSettlement <= evt.payoutCap ? evt.payoutCap : _hypoSettlement;
+            priceMove = evt.strike - effective;
+        }
+        return (_notional * priceMove) / evt.initialRate;
     }
 
     /**
