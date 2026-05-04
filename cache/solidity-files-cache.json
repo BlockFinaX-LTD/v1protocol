@@ -894,6 +894,44 @@
       "artifacts": [
         "MockERC20"
       ]
+    },
+    "C:\\Users\\ADMIN\\BlockFinaXcode\\contracts\\src\\mocks\\TestFacets.sol": {
+      "lastModificationDate": 1777905627713,
+      "contentHash": "fc9e8396ce699b98637254b9d41f1c2d",
+      "sourceName": "src/mocks/TestFacets.sol",
+      "solcConfig": {
+        "version": "0.8.20",
+        "settings": {
+          "optimizer": {
+            "enabled": true,
+            "runs": 200
+          },
+          "viaIR": true,
+          "evmVersion": "paris",
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [],
+      "versionPragmas": [
+        "0.8.20"
+      ],
+      "artifacts": [
+        "TestPureFacet",
+        "TestPureFacetV2"
+      ]
     }
   }
 }
