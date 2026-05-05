@@ -14,11 +14,12 @@ async function main() {
   const addr = await facet.getAddress();
   console.log("OwnershipFacet deployed at:", addr);
 
+  fs.mkdirSync("deployments", { recursive: true });
   fs.writeFileSync(
-    "deployments-ownership-facet-liskMainnet.json",
+    "deployments/deployments-ownership-facet-liskMainnet.json",
     JSON.stringify({ ownershipFacet: addr, deployedAt: new Date().toISOString() }, null, 2)
   );
-  console.log("Saved.");
+  console.log("Saved to deployments/deployments-ownership-facet-liskMainnet.json");
 }
 
 main().catch(e => { console.error(e.message); process.exit(1); });

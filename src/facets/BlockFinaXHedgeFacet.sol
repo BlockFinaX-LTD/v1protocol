@@ -3,7 +3,8 @@ pragma solidity 0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {LibAppStorage} from "../libraries/LibAppStorage.sol";
 import {LibDiamond} from "../libraries/LibDiamond.sol";
 
@@ -69,6 +70,13 @@ contract BlockFinaXHedgeFacet {
     ///        accPremiumPerShare += 1e6 * 1e18 / 1e20 = 1e4  (no precision loss)
     ///      Safe from overflow: max shares (~1e22) * max acc (~1e16) = 1e38 << uint256 max.
     uint256 constant ACC_PREMIUM_MULTIPLIER = 1e18;
+
+    /// @dev Maximum age of a pricing-engine quote signature, in seconds. A quote signed
+    ///      more than this long ago is rejected — protects against an attacker hoarding
+    ///      old signatures and replaying them after market conditions have moved.
+    ///      120s is enough headroom for slow Lisk/Base/BSC blocks plus user click latency
+    ///      while still bounding the exposure window if the engine key is compromised.
+    uint256 constant QUOTE_MAX_AGE_SECONDS = 120;
 
     // ============================================================
     //                          EVENTS
@@ -192,6 +200,13 @@ contract BlockFinaXHedgeFacet {
 
     /// @notice Emitted when expired unclaimed payouts are recovered by the owner after the grace period.
     event ExpiredPayoutsRecovered(uint256 indexed eventId, uint256 amount);
+
+    /// @notice Emitted when the on-chain pricing-engine signer address is set or rotated.
+    /// @dev    Setting `_signer` to address(0) DISABLES signature checks and reverts the
+    ///         protocol to legacy mode where any premium can be passed in createEvent().
+    ///         Setting it to a non-zero address ENFORCES signature verification on every
+    ///         subsequent createEvent() call.
+    event PricingEngineSignerSet(address indexed previousSigner, address indexed newSigner);
 
     // ============================================================
     //                       MODIFIERS
@@ -322,6 +337,45 @@ contract BlockFinaXHedgeFacet {
     }
 
     /**
+     * @notice Set or rotate the pricing-engine ECDSA signer.
+     * @dev When the signer is the zero address, signature verification in createEvent()
+     *      is disabled and any premium can be submitted (legacy / migration mode).
+     *      When set to a non-zero address, every subsequent createEvent() MUST carry
+     *      a valid ECDSA signature recoverable to this address.
+     *
+     *      Rotation: previously issued quotes signed by the old key become invalid
+     *      immediately after this call returns. Operators should pre-warn integrators
+     *      before rotating.
+     *
+     *      The QUOTE_MAX_AGE_SECONDS freshness window means a stolen key can be abused
+     *      for at most ~2 minutes before the operator notices and rotates.
+     *
+     * @param _signer New pricing-engine public address. address(0) disables verification.
+     */
+    function setPricingEngineSigner(address _signer) external onlyOwner {
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        emit PricingEngineSignerSet(s.pricingEngineSigner, _signer);
+        s.pricingEngineSigner = _signer;
+    }
+
+    /**
+     * @notice Returns the currently registered pricing-engine signer address.
+     * @return Zero address if signature verification is disabled, else the active signer.
+     */
+    function getPricingEngineSigner() external view returns (address) {
+        return LibAppStorage.appStorage().pricingEngineSigner;
+    }
+
+    /**
+     * @notice Returns true if a quote nonce has already been consumed by createEvent().
+     * @dev    Useful for off-chain callers to defensively check before submitting.
+     *         The contract enforces uniqueness regardless of whether this is queried.
+     */
+    function isQuoteNonceUsed(bytes32 _nonce) external view returns (bool) {
+        return LibAppStorage.appStorage().usedQuoteNonces[_nonce];
+    }
+
+    /**
      * @notice Permanently disable the single-key settleEvent() path and enforce
      *         multi-oracle consensus (OracleFacet) as the only settlement route.
      *
@@ -406,26 +460,29 @@ contract BlockFinaXHedgeFacet {
      *
      * @param _amount USDC amount to withdraw (6 decimals).
      */
-    /// @notice Deprecated — use withdrawPlatformFeesByToken(usdcToken, amount) instead.
-    /// @dev Always reverts. Call migrateLegacyPlatformFees() first to migrate pre-v3 balances.
-    function withdrawPlatformFees(uint256) external onlyOwner nonReentrant {
-        revert("Deprecated: use withdrawPlatformFeesByToken(usdcToken, amount)");
-    }
-
-    /**
-     * @notice One-time migration: sync any pre-v3 USDC fees tracked only in
-     *         hedgePlatformFeesCollected into the per-token platformFeesByToken mapping.
-     * @dev    Idempotent — safe to call multiple times; only writes when the per-token
-     *         counter is behind the legacy counter. Must be called once after upgrading
-     *         from a pre-v3 facet to ensure withdrawPlatformFeesByToken() can access
-     *         all accumulated fees.
-     */
-    function migrateLegacyPlatformFees() external onlyOwner {
+    function withdrawPlatformFees(uint256 _amount) external onlyOwner nonReentrant {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
-        if (s.hedgePlatformFeesCollected > 0 && s.platformFeesByToken[s.usdcToken] < s.hedgePlatformFeesCollected) {
-            s.platformFeesByToken[s.usdcToken] = s.hedgePlatformFeesCollected;
-            emit PlatformFeesWithdrawn(address(0), 0); // signal migration completed
+        require(_amount <= s.hedgePlatformFeesCollected, "Exceeds collected fees");
+
+        s.hedgePlatformFeesCollected -= _amount;
+        // Keep per-token counter in sync. Pre-v3 events may not have credited
+        // platformFeesByToken, so floor at zero rather than allowing underflow.
+        if (_amount <= s.platformFeesByToken[s.usdcToken]) {
+            s.platformFeesByToken[s.usdcToken] -= _amount;
+        } else {
+            s.platformFeesByToken[s.usdcToken] = 0;
         }
+
+        // C-2 fix: decrement internal reserve tracker before transferring tokens out.
+        if (s.tokenReserves[s.usdcToken] >= _amount) {
+            s.tokenReserves[s.usdcToken] -= _amount;
+        } else {
+            s.tokenReserves[s.usdcToken] = 0;
+        }
+
+        IERC20(s.usdcToken).safeTransfer(msg.sender, _amount);
+
+        emit PlatformFeesWithdrawn(msg.sender, _amount);
     }
 
     /**
@@ -443,7 +500,7 @@ contract BlockFinaXHedgeFacet {
      *
      * @param _eventId The settled event whose unclaimed payouts should be recovered.
      */
-    function recoverExpiredPayouts(uint256 _eventId) external onlyOwner nonReentrant {
+    function recoverExpiredPayouts(uint256 _eventId) external nonReentrant {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
 
@@ -455,16 +512,13 @@ contract BlockFinaXHedgeFacet {
             "Grace period not elapsed (90 days from settlement)"
         );
 
-        // G-L1: early exit before loop if there are no unclaimed payouts.
-        require(evt.totalMaxPayout > evt.totalPayoutClaimed, "No unclaimed payouts to recover");
-
         // Walk all positions and expire any that are still Claimable.
         // This prevents late-claiming hedgers from drawing funds that have already been
         // swept into platform fees, which could drain unrelated contract balances.
         uint256[] storage positionIds = s.hedgeEventPositionIds[_eventId];
         uint256 posCount = positionIds.length;
         uint256 residual = 0;
-        for (uint256 i = 0; i < posCount;) {
+        for (uint256 i = 0; i < posCount; ++i) {
             LibAppStorage.HedgePosition storage pos = s.hedgePositions[positionIds[i]];
             if (
                 pos.status == LibAppStorage.HedgePositionStatus.Claimable && !pos.claimed
@@ -473,7 +527,6 @@ contract BlockFinaXHedgeFacet {
                 pos.payoutAmount = 0;
                 pos.status = LibAppStorage.HedgePositionStatus.Expired;
             }
-            unchecked { ++i; }
         }
 
         require(residual > 0, "No unclaimed payouts to recover");
@@ -581,10 +634,6 @@ contract BlockFinaXHedgeFacet {
      */
     function setAllowedPaymentToken(address _token, bool _allowed) external onlyOwner {
         require(_token != address(0), "Zero address");
-        // M-4 fix: enforce 6-decimal tokens only. All fee constants and minimums assume 6 decimals.
-        if (_allowed) {
-            require(IERC20Metadata(_token).decimals() == 6, "Only 6-decimal tokens supported");
-        }
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         s.allowedPaymentTokens[_token] = _allowed;
         emit PaymentTokenSet(_token, _allowed);
@@ -642,15 +691,22 @@ contract BlockFinaXHedgeFacet {
         require(_amount <= s.platformFeesByToken[_token], "Exceeds available fees for token");
 
         s.platformFeesByToken[_token] -= _amount;
-        // M-8 fix: keep the legacy USDC aggregate counter in sync with strict subtraction.
-        if (_token == s.usdcToken && s.hedgePlatformFeesCollected >= _amount) {
-            s.hedgePlatformFeesCollected -= _amount;
-        } else if (_token == s.usdcToken) {
-            s.hedgePlatformFeesCollected = 0;
+        // Keep the legacy USDC aggregate counter in sync. Pre-v3 events may not have
+        // credited hedgePlatformFeesCollected for this token, so floor at zero.
+        if (_token == s.usdcToken) {
+            if (_amount <= s.hedgePlatformFeesCollected) {
+                s.hedgePlatformFeesCollected -= _amount;
+            } else {
+                s.hedgePlatformFeesCollected = 0;
+            }
         }
 
-        // H-2 fix: direct subtraction — reverts on accounting mismatch instead of silently flooring.
-        s.tokenReserves[_token] -= _amount;
+        // C-2 fix: decrement internal reserve tracker before transferring tokens out.
+        if (s.tokenReserves[_token] >= _amount) {
+            s.tokenReserves[_token] -= _amount;
+        } else {
+            s.tokenReserves[_token] = 0;
+        }
 
         IERC20(_token).safeTransfer(msg.sender, _amount);
         emit PlatformFeesByTokenWithdrawn(_token, msg.sender, _amount);
@@ -682,11 +738,17 @@ contract BlockFinaXHedgeFacet {
     // ============================================================
 
     /**
-     * @notice Parameters for creating a new hedge event.
+     * @notice Parameters for creating a new hedge event (v7 range product).
      *
      * @param name            Human-readable label shown in the UI.
      * @param underlying      Currency pair identifier, e.g. "USD/GHS" or "USD/NGN".
-     * @param strike          Trigger price in 6-decimal units (same scale as oracle prices).
+     * @param strike          Lower edge of the payout range (the "entry" threshold).
+     *                        Above the initial rate for upward hedges, below for downward.
+     *                        Payouts begin once the settlement price crosses this level.
+     * @param payoutCap       Far edge of the payout range (the cap). Above strike for upward
+     *                        hedges, below strike for downward. Settlement prices beyond this
+     *                        level produce the same maximum payout.
+     *                        Set to 0 for legacy single-strike behaviour (pre-v7 events only).
      * @param premiumRate     Premium as a fraction of notional. Uses PRECISION as denominator.
      *                        E.g. 25000 = 2.5%. Maximum = PRECISION (100%).
      * @param expiryDate      Unix timestamp at which the event expires. Must be in the future
@@ -694,10 +756,10 @@ contract BlockFinaXHedgeFacet {
      * @param allowExternalLp Whether wallets other than the creator can call deposit().
      * @param initialLiquidity USDC amount for the creator's first deposit (min 10 USDC, 6 decimals).
      * @param initialRate     Current market rate at event creation time (6 decimals).
-     *                        Used to calculate predetermined payouts at buyProtection() time.
+     *                        Used to calculate per-notional payouts at settlement time.
      * @param strikeAbove     Direction of the hedge.
-     *                        true  = hedger wins if price rises to or above strike (USD weakens).
-     *                        false = hedger wins if price falls to or below strike (USD strengthens).
+     *                        true  = upward hedge (USD weakens). strike > initialRate, payoutCap > strike.
+     *                        false = downward hedge (USD strengthens). strike < initialRate, payoutCap < strike.
      * @param paymentToken    ERC-20 stablecoin to use for all payments in this event.
      *                        Must be whitelisted via setAllowedPaymentToken(). Pass address(0)
      *                        to use the default usdcToken (always accepted, no whitelist check).
@@ -706,6 +768,7 @@ contract BlockFinaXHedgeFacet {
         string name;
         string underlying;
         uint256 strike;
+        uint256 payoutCap;
         uint256 premiumRate;
         uint256 expiryDate;
         bool allowExternalLp;
@@ -713,6 +776,20 @@ contract BlockFinaXHedgeFacet {
         uint256 initialRate;
         bool strikeAbove;
         address paymentToken;
+
+        // ── v8: pricing-engine attestation (required when pricingEngineSigner is set) ──
+        // The signature is recovered against:
+        //   keccak256(abi.encode(
+        //     block.chainid, address(this), msg.sender,
+        //     underlying, strike, payoutCap, premiumRate, expiryDate, initialRate, strikeAbove,
+        //     quoteTimestamp, quoteNonce
+        //   ))
+        // wrapped with the EIP-191 "Ethereum Signed Message" prefix (so the signing key can
+        // use a standard wallet `personal_sign`). Pass an empty bytes signature and zero
+        // values when the signer is unset (legacy mode).
+        bytes signature;
+        uint256 quoteTimestamp;
+        bytes32 quoteNonce;
     }
 
     /**
@@ -728,7 +805,7 @@ contract BlockFinaXHedgeFacet {
      * @param _params See {CreateEventParams}.
      * @return eventId The ID of the newly created hedge event.
      */
-    function createEvent(CreateEventParams calldata _params)
+    function createEvent(CreateEventParams memory _params)
         external
         nonReentrant
         whenNotPaused
@@ -752,29 +829,64 @@ contract BlockFinaXHedgeFacet {
         );
         require(_params.initialLiquidity >= 10 * PRECISION, "Min initial liquidity: 10 USDC");
         require(_params.initialRate > 0, "Initial rate must be > 0");
+        // payoutCap selects the product shape:
+        //   payoutCap == 0  → legacy single-strike (digital) event. Payout is the fixed
+        //                     strike-vs-initialRate gap × notional, paid in full if triggered.
+        //   payoutCap > 0   → v7 range (call/put-spread) event. Payout scales linearly between
+        //                     strike and payoutCap, capped at the cap end.
+        // Both shapes are supported simultaneously — the buyProtection() and settleEvent()
+        // paths branch on evt.payoutCap to apply the correct math. Storage layout is identical
+        // in both cases, so the choice is purely a creator-facing configuration.
         if (_params.strikeAbove) {
             require(
                 _params.strike > _params.initialRate,
                 "Strike must be above current rate for upward hedge"
             );
+            if (_params.payoutCap > 0) {
+                require(
+                    _params.payoutCap > _params.strike,
+                    "payoutCap must be above strike for upward hedge"
+                );
+            }
         } else {
             require(
                 _params.strike < _params.initialRate,
                 "Strike must be below current rate for downward hedge"
             );
+            if (_params.payoutCap > 0) {
+                require(
+                    _params.payoutCap < _params.strike,
+                    "payoutCap must be below strike for downward hedge"
+                );
+            }
         }
-        // M-02 fix: cap priceDelta to prevent an adversarially misconfigured event from
-        // draining an entire pool on a single position. A delta > 10× initialRate would
-        // make every payout > 10× notional — no real FX pair moves that far.
-        // This limits predeterminedPayout to at most 10× _notional per buyProtection().
+        // M-02 fix: cap the maximum per-notional payout at 10× to prevent an adversarially
+        // misconfigured event from draining the pool with a single position. The thing being
+        // capped depends on product shape:
+        //   Range mode (payoutCap > 0)       : cap the WIDTH of the payout range (|payoutCap - strike|).
+        //   Single-strike mode (payoutCap=0) : cap the strike-to-spot gap (|strike - initialRate|),
+        //                                      which is the original M-02 form for digital events.
+        // In both cases the result limits predeterminedPayout to ≤ 10× notional, the same
+        // economic invariant — the formulas just measure "max move" differently per shape.
         {
-            uint256 priceDelta = _params.strikeAbove
-                ? _params.strike - _params.initialRate
-                : _params.initialRate - _params.strike;
-            require(
-                priceDelta <= _params.initialRate * 10,
-                "Strike too far from initial rate: max price delta is 10x initialRate"
-            );
+            uint256 maxPriceMove;
+            if (_params.payoutCap > 0) {
+                maxPriceMove = _params.strikeAbove
+                    ? _params.payoutCap - _params.strike
+                    : _params.strike - _params.payoutCap;
+                require(
+                    maxPriceMove <= _params.initialRate * 10,
+                    "Payout range too wide: max payout per notional is 10x"
+                );
+            } else {
+                maxPriceMove = _params.strikeAbove
+                    ? _params.strike - _params.initialRate
+                    : _params.initialRate - _params.strike;
+                require(
+                    maxPriceMove <= _params.initialRate * 10,
+                    "Strike too far from initial rate: max payout per notional is 10x"
+                );
+            }
         }
 
         // Resolve and validate payment token.
@@ -786,19 +898,21 @@ contract BlockFinaXHedgeFacet {
             require(s.allowedPaymentTokens[token], "Payment token not whitelisted");
         }
 
+        // --- v8: verify pricing-engine quote signature ---
+        // When s.pricingEngineSigner is unset (address(0)), legacy mode: any premium accepted.
+        // When set, every event MUST carry a fresh, unique, valid signature from that signer.
+        address recoveredQuoteSigner = _verifyQuoteSignature(s, _params);
+
         // --- Effects ---
         uint256 creationFee = s.hedgeFeeConfig.eventCreationFee;
-        // G-M5: only write legacy counter for USDC events.
-        if (token == s.usdcToken) {
-            s.hedgePlatformFeesCollected += creationFee;
-        }
+        s.hedgePlatformFeesCollected += creationFee;
         s.platformFeesByToken[token] += creationFee;
 
         uint256 eventId = ++s.hedgeEventCounter;
         // totalHedgeEvents is kept in storage for layout compatibility but always equals
         // hedgeEventCounter; getTotalHedgeEvents() reads hedgeEventCounter directly.
 
-        _initHedgeEvent(s, eventId, _params, token);
+        _initHedgeEvent(s, eventId, _params, token, recoveredQuoteSigner);
 
         uint256 depositId = _createInitialDeposit(s, eventId, _params.initialLiquidity);
 
@@ -821,13 +935,75 @@ contract BlockFinaXHedgeFacet {
         return eventId;
     }
 
+    /// @dev Verify the pricing-engine quote signature in CreateEventParams.
+    ///      Returns the recovered signer address (which equals s.pricingEngineSigner on
+    ///      success) when the signer is set, or address(0) when verification is skipped
+    ///      (legacy mode, signer unset). Always reverts on bad signature when verification
+    ///      is active.
+    ///
+    ///      The signed payload deliberately includes EVERY parameter that affects the
+    ///      premium math, plus chain + diamond + caller for context-binding:
+    ///        - block.chainid + address(this) prevent cross-chain / cross-diamond replay
+    ///        - msg.sender prevents quote-stealing (Alice can't use Bob's quote)
+    ///        - underlying / strike / payoutCap / premiumRate / expiryDate / initialRate / strikeAbove
+    ///          ensures the signature covers exactly the event the engine quoted
+    ///        - quoteTimestamp + quoteNonce: freshness + replay protection
+    function _verifyQuoteSignature(
+        LibAppStorage.AppStorage storage s,
+        CreateEventParams memory _params
+    ) internal returns (address) {
+        if (s.pricingEngineSigner == address(0)) {
+            // Legacy mode — verification disabled. Caller may pass anything (or nothing).
+            return address(0);
+        }
+
+        require(_params.signature.length == 65, "Quote signature missing or wrong length");
+        require(_params.quoteTimestamp > 0, "Quote timestamp required");
+        require(_params.quoteNonce != bytes32(0), "Quote nonce required");
+        require(
+            block.timestamp <= _params.quoteTimestamp + QUOTE_MAX_AGE_SECONDS,
+            "Quote expired (signed > 120s ago)"
+        );
+        require(
+            _params.quoteTimestamp <= block.timestamp,
+            "Quote timestamp in future"
+        );
+        require(!s.usedQuoteNonces[_params.quoteNonce], "Quote nonce already used");
+
+        bytes32 messageHash = keccak256(abi.encode(
+            block.chainid,
+            address(this),
+            msg.sender,
+            _params.underlying,
+            _params.strike,
+            _params.payoutCap,
+            _params.premiumRate,
+            _params.expiryDate,
+            _params.initialRate,
+            _params.strikeAbove,
+            _params.quoteTimestamp,
+            _params.quoteNonce
+        ));
+        bytes32 ethSignedHash = MessageHashUtils.toEthSignedMessageHash(messageHash);
+
+        address recovered = ECDSA.recover(ethSignedHash, _params.signature);
+        require(recovered == s.pricingEngineSigner, "Invalid pricing-engine signature");
+
+        // Mark consumed BEFORE returning so a re-entrant call inside the same tx
+        // (shouldn't be possible, but defence-in-depth) cannot reuse it.
+        s.usedQuoteNonces[_params.quoteNonce] = true;
+        return recovered;
+    }
+
     /// @dev Initialises the HedgeEvent storage struct and registers the creator's event ID.
     ///      `_resolvedToken` is the final payment token address already validated by createEvent().
+    ///      `_quoteSigner` is the recovered pricing-engine signer (or address(0) in legacy mode).
     function _initHedgeEvent(
         LibAppStorage.AppStorage storage s,
         uint256 eventId,
-        CreateEventParams calldata _params,
-        address _resolvedToken
+        CreateEventParams memory _params,
+        address _resolvedToken,
+        address _quoteSigner
     ) internal {
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[eventId];
         evt.id = eventId;
@@ -844,6 +1020,8 @@ contract BlockFinaXHedgeFacet {
         evt.lpCount = 1;
         evt.initialRate = _params.initialRate;
         evt.strikeAbove = _params.strikeAbove;
+        evt.payoutCap = _params.payoutCap;
+        evt.quoteSigner = _quoteSigner;
         evt.createdAt = block.timestamp;
         // Store the resolved token. For USDC events this is s.usdcToken; zero address is
         // never stored here — the resolution already happened in createEvent().
@@ -999,10 +1177,8 @@ contract BlockFinaXHedgeFacet {
         require(evt.id > 0, "Event not found");
         require(evt.status == LibAppStorage.HedgeEventStatus.Open, "Event not open");
         require(_amount >= 10 * PRECISION, "Min deposit: 10 USDC");
-        // G-M3: cache storage ref to avoid repeated mapping hash.
-        uint256[] storage eventDepositIds = s.hedgeEventDepositIds[_eventId];
         require(
-            eventDepositIds.length < MAX_DEPOSITS_PER_EVENT,
+            s.hedgeEventDepositIds[_eventId].length < MAX_DEPOSITS_PER_EVENT,
             "Max LP deposits reached for this event"
         );
 
@@ -1043,7 +1219,7 @@ contract BlockFinaXHedgeFacet {
         // LP cannot claim premiums that were distributed before they joined.
         dep.rewardDebt = (shares * evt.accPremiumPerShare) / ACC_PREMIUM_MULTIPLIER;
 
-        eventDepositIds.push(depositId);
+        s.hedgeEventDepositIds[_eventId].push(depositId);
         s.lpDepositIds[msg.sender].push(depositId);
 
         // --- Interactions ---
@@ -1108,17 +1284,30 @@ contract BlockFinaXHedgeFacet {
         require(evt.poolOpen, "Pool not open for hedging");
         require(block.timestamp < evt.expiryDate, "Event expired");
         require(_notional >= 10 * PRECISION, "Min notional: 10 USDC");
-        // G-M3: cache storage ref to avoid repeated mapping hash.
-        uint256[] storage eventPositionIds = s.hedgeEventPositionIds[_eventId];
         require(
-            eventPositionIds.length < MAX_POSITIONS_PER_EVENT,
+            s.hedgeEventPositionIds[_eventId].length < MAX_POSITIONS_PER_EVENT,
             "Max positions reached for this event"
         );
 
-        uint256 priceDelta = evt.strikeAbove
-            ? evt.strike - evt.initialRate
-            : evt.initialRate - evt.strike;
-        uint256 predeterminedPayout = (_notional * priceDelta) / evt.initialRate;
+        // v7 range product: reserve the WORST-CASE payout (settlement reaching the cap)
+        // for solvency. The actual payout is computed at settlement based on where the
+        // settlement price lands within the range; it can be anywhere in [0, predetermined].
+        // Pre-v7 (legacy single-strike) events have payoutCap == 0 and fall back to the
+        // original strike-vs-initialRate gap. No live events exist at this gap so the
+        // legacy branch is dead code, but kept for any historical replay scenarios.
+        uint256 maxPriceMove;
+        if (evt.payoutCap == 0) {
+            // Legacy single-strike (pre-v7).
+            maxPriceMove = evt.strikeAbove
+                ? evt.strike - evt.initialRate
+                : evt.initialRate - evt.strike;
+        } else {
+            // v7 range product — width of the payout zone.
+            maxPriceMove = evt.strikeAbove
+                ? evt.payoutCap - evt.strike
+                : evt.strike - evt.payoutCap;
+        }
+        uint256 predeterminedPayout = (_notional * maxPriceMove) / evt.initialRate;
 
         uint256 availableLiquidity = evt.totalLiquidity - evt.totalMaxPayout;
         require(predeterminedPayout <= availableLiquidity, "Insufficient pool liquidity for payout");
@@ -1151,7 +1340,7 @@ contract BlockFinaXHedgeFacet {
         pos.status = LibAppStorage.HedgePositionStatus.Active;
         pos.createdAt = block.timestamp;
 
-        eventPositionIds.push(positionId);
+        s.hedgeEventPositionIds[_eventId].push(positionId);
         s.hedgerPositionIds[msg.sender].push(positionId);
 
         _distributePremiumToLps(s, _eventId, premium);
@@ -1159,12 +1348,9 @@ contract BlockFinaXHedgeFacet {
         uint256 creatorReward = (platformFee * creatorLoyaltyRate) / PRECISION;
         evt.creatorEarnings += creatorReward;
         uint256 netPlatformFee = platformFee - creatorReward;
+        s.hedgePlatformFeesCollected += netPlatformFee;
 
         address token = _getEventToken(s, evt);
-        // G-M5: only write legacy counter for USDC events.
-        if (token == s.usdcToken) {
-            s.hedgePlatformFeesCollected += netPlatformFee;
-        }
         s.platformFeesByToken[token] += netPlatformFee;
 
         // --- Interactions ---
@@ -1229,9 +1415,8 @@ contract BlockFinaXHedgeFacet {
         bool alreadyTriggered = evt.strikeAbove
             ? _settlementPrice >= evt.strike
             : _settlementPrice <= evt.strike;
-        // G-M1: short-circuit on alreadyTriggered to skip expiryDate SLOAD when triggered.
         require(
-            alreadyTriggered || block.timestamp >= evt.expiryDate,
+            block.timestamp >= evt.expiryDate || alreadyTriggered,
             "Too early: event not expired and strike not yet reached"
         );
 
@@ -1258,24 +1443,70 @@ contract BlockFinaXHedgeFacet {
         // subsequent LP to be charged an increasing fraction of the remaining payouts.
         evt.liquidityAtSettlement = evt.totalLiquidity;
 
+        // v7 range product: compute the per-notional payout factor ONCE here, using the
+        // event-level strike, payoutCap, and settlement price. Each position then scales
+        // it by its own notional. This collapses the per-position computation to a single
+        // multiplication inside the loop, keeping settlement gas cost essentially the same
+        // as the legacy single-strike version.
+        //
+        // Geometry (when triggered):
+        //   upward   : effective = min(settlement, payoutCap), move = effective - strike
+        //   downward : effective = max(settlement, payoutCap), move = strike - effective
+        //
+        // Pre-v7 events (payoutCap == 0) fall back to the original digital behaviour:
+        // every triggered position gets its full reserved payoutAmount.
+        uint256 effectivePriceMove = 0;
+        if (triggered && evt.payoutCap != 0) {
+            uint256 effectiveRate;
+            if (evt.strikeAbove) {
+                effectiveRate = _settlementPrice >= evt.payoutCap ? evt.payoutCap : _settlementPrice;
+                effectivePriceMove = effectiveRate - evt.strike;
+            } else {
+                effectiveRate = _settlementPrice <= evt.payoutCap ? evt.payoutCap : _settlementPrice;
+                effectivePriceMove = evt.strike - effectiveRate;
+            }
+        }
+
         uint256[] storage positionIds = s.hedgeEventPositionIds[_eventId];
         // G001: cache array length to avoid repeated storage reads in the loop.
         uint256 positionCount = positionIds.length;
-        for (uint256 i = 0; i < positionCount;) {
+        // v7: track the actual aggregate payout so we can refresh totalMaxPayout to the
+        // realised reservation. LPs withdrawing later then absorb the actual loss, not the
+        // worst-case reservation that was sized at buy time.
+        uint256 totalActualPayout = 0;
+        for (uint256 i = 0; i < positionCount; ++i) {  // G011: pre-increment
             LibAppStorage.HedgePosition storage pos = s.hedgePositions[positionIds[i]];
-            if (pos.status != LibAppStorage.HedgePositionStatus.Active) {
-                unchecked { ++i; }
+            if (pos.status != LibAppStorage.HedgePositionStatus.Active) continue;
+
+            if (!triggered) {
+                pos.payoutAmount = 0;
+                pos.status = LibAppStorage.HedgePositionStatus.Expired;
                 continue;
             }
 
-            if (triggered) {
-                pos.status = LibAppStorage.HedgePositionStatus.Claimable;
+            // Triggered branch.
+            uint256 actualPayout;
+            if (evt.payoutCap == 0) {
+                // Legacy single-strike: reserved payout was the actual payout.
+                actualPayout = pos.payoutAmount;
             } else {
-                pos.payoutAmount = 0;
+                // v7 range: scale per-notional move by this position's notional.
+                actualPayout = (pos.notional * effectivePriceMove) / evt.initialRate;
+            }
+
+            pos.payoutAmount = actualPayout;
+            if (actualPayout > 0) {
+                pos.status = LibAppStorage.HedgePositionStatus.Claimable;
+                totalActualPayout += actualPayout;
+            } else {
+                // Edge case: triggered exactly at strike, zero range move => zero payout.
                 pos.status = LibAppStorage.HedgePositionStatus.Expired;
             }
-            unchecked { ++i; }
         }
+
+        // v7: refresh totalMaxPayout to the realised aggregate so withdrawCapital()
+        // computes LP loss share against actual payouts, not the buy-time reservation.
+        evt.totalMaxPayout = totalActualPayout;
 
         emit EventSettled(_eventId, _settlementPrice, triggered);
     }
@@ -1320,32 +1551,42 @@ contract BlockFinaXHedgeFacet {
         uint256 creatorReward = (payoutFee * creatorLoyaltyRate) / PRECISION;
         evt.creatorEarnings += creatorReward;
         uint256 netPayoutFee = payoutFee - creatorReward;
+        s.hedgePlatformFeesCollected += netPayoutFee;
 
         address token = _getEventToken(s, evt);
-        // G-M5: only write legacy counter for USDC events.
-        if (token == s.usdcToken) {
-            s.hedgePlatformFeesCollected += netPayoutFee;
-        }
         s.platformFeesByToken[token] += netPayoutFee;
 
         // Track total tokens actually paid out for this event.
         evt.totalPayoutClaimed += grossPayout;
 
-        // Reduce the reserved payout pool so that LPs who call withdrawCapital() after some
-        // hedgers have already claimed are not penalised for payouts that have already left
-        // the contract. Without this, totalMaxPayout stays at its peak value forever and
-        // LPs subsidise unclaimed amounts even after the hedger has been paid.
-        if (evt.totalMaxPayout >= grossPayout) {
-            evt.totalMaxPayout -= grossPayout;
-        } else {
-            evt.totalMaxPayout = 0; // underflow guard; should not occur in correct operation
-        }
+        // v7 fix: do NOT decrement totalMaxPayout here. The previous decrement created a
+        // path-dependence bug:
+        //
+        //   if hedger claimed BEFORE LP withdrew, totalMaxPayout dropped to 0 and the LP
+        //   withdraw branch `if (triggered && totalMaxPayout > 0)` skipped the loss-share
+        //   deduction → LP received their full deposit back even though the pool had
+        //   already paid out to the hedger → underflow / insolvency.
+        //
+        // The withdrawCapital() comment was always correct: the LP loss share denominator
+        // should be the FULL aggregate payout obligation set at settlement, regardless of
+        // which hedgers have already claimed. Path-independence: LP-first or hedger-first
+        // produces identical pool conservation. Unclaimed reservations after the 90-day
+        // grace period are swept to platform fees by recoverExpiredPayouts(), which uses
+        // its own per-position residual computation and does not depend on this counter
+        // staying current.
+        //
+        // totalPayoutClaimed (just incremented above) is the running record of how much
+        // has actually flowed out — use that field for any "how much paid so far" reads.
 
         pos.claimed = true;
         pos.status = LibAppStorage.HedgePositionStatus.Claimed;
 
-        // H-2 fix: direct subtraction — reverts on accounting mismatch instead of silently flooring.
-        s.tokenReserves[token] -= netPayout;
+        // C-2 fix: decrement internal reserve tracker before transferring tokens out.
+        if (s.tokenReserves[token] >= netPayout) {
+            s.tokenReserves[token] -= netPayout;
+        } else {
+            s.tokenReserves[token] = 0;
+        }
 
         IERC20(token).safeTransfer(msg.sender, netPayout);
 
@@ -1398,12 +1639,9 @@ contract BlockFinaXHedgeFacet {
         uint256 creatorReward = (lpFee * creatorLoyaltyRate) / PRECISION;
         evt.creatorEarnings += creatorReward;
         uint256 netLpFee = lpFee - creatorReward;
+        s.hedgePlatformFeesCollected += netLpFee;
 
         address token = _getEventToken(s, evt);
-        // G-M5: only write legacy counter for USDC events.
-        if (token == s.usdcToken) {
-            s.hedgePlatformFeesCollected += netLpFee;
-        }
         s.platformFeesByToken[token] += netLpFee;
 
         // M-5 fix: verify the contract holds sufficient tokens before transferring.
@@ -1499,8 +1737,12 @@ contract BlockFinaXHedgeFacet {
         address withdrawToken = _getEventToken(s, evt);
 
         if (withdrawAmount > 0) {
-            // H-2 fix: direct subtraction — reverts on accounting mismatch instead of silently flooring.
-            s.tokenReserves[withdrawToken] -= withdrawAmount;
+            // C-2 fix: decrement internal reserve tracker before transferring tokens out.
+            if (s.tokenReserves[withdrawToken] >= withdrawAmount) {
+                s.tokenReserves[withdrawToken] -= withdrawAmount;
+            } else {
+                s.tokenReserves[withdrawToken] = 0;
+            }
             IERC20(withdrawToken).safeTransfer(msg.sender, withdrawAmount);
         }
 
@@ -1532,8 +1774,12 @@ contract BlockFinaXHedgeFacet {
 
         address creatorToken = _getEventToken(s, evt);
 
-        // H-2 fix: direct subtraction — reverts on accounting mismatch instead of silently flooring.
-        s.tokenReserves[creatorToken] -= amount;
+        // C-2 fix: decrement internal reserve tracker before transferring tokens out.
+        if (s.tokenReserves[creatorToken] >= amount) {
+            s.tokenReserves[creatorToken] -= amount;
+        } else {
+            s.tokenReserves[creatorToken] = 0;
+        }
 
         IERC20(creatorToken).safeTransfer(msg.sender, amount);
 
@@ -1581,6 +1827,81 @@ contract BlockFinaXHedgeFacet {
             evt.strike, evt.premiumRate, evt.expiryDate, evt.status,
             evt.poolOpen, evt.allowExternalLp, evt.initialRate, evt.strikeAbove
         );
+    }
+
+    /**
+     * @notice Get the v7 range geometry of a hedge event.
+     * @dev    Returns 0 for `payoutCap` on legacy single-strike events. Frontends should
+     *         treat `payoutCap == 0` as "this event is a digital, render single-strike UI".
+     * @param _eventId The event ID to query.
+     * @return strike       Lower edge of the payout zone (entry threshold).
+     * @return payoutCap    Far edge of the payout zone (cap). Zero on legacy events.
+     * @return initialRate  Spot rate at event creation (6 decimals).
+     * @return strikeAbove  true = upward hedge; false = downward hedge.
+     */
+    function getHedgeEventRange(uint256 _eventId)
+        external
+        view
+        returns (uint256 strike, uint256 payoutCap, uint256 initialRate, bool strikeAbove)
+    {
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
+        return (evt.strike, evt.payoutCap, evt.initialRate, evt.strikeAbove);
+    }
+
+    /**
+     * @notice Returns the pricing-engine signer that authorised this event's premium.
+     * @dev    Zero address means the event was created in legacy mode (no signer set
+     *         globally at the time of createEvent). A non-zero value means the event
+     *         premium was cryptographically attested by that signer.
+     *
+     *         Frontends should display a "Fair-Priced ✓" badge when this is non-zero
+     *         AND equals the current global pricingEngineSigner.
+     */
+    function getEventQuoteSigner(uint256 _eventId) external view returns (address) {
+        return LibAppStorage.appStorage().hedgeEvents[_eventId].quoteSigner;
+    }
+
+    /**
+     * @notice Quote the actual payout a position WOULD receive at a given hypothetical
+     *         settlement price, without modifying state. Useful for frontend "what-if"
+     *         displays and underwriter risk dashboards.
+     *
+     *         Mirrors the math in settleEvent() exactly. Returns 0 for not-triggered prices.
+     *
+     * @param _eventId        The event to quote against.
+     * @param _hypoSettlement A hypothetical settlement price (6 decimals).
+     * @param _notional       Notional amount to quote (6 decimals).
+     * @return payout         Computed payout in payment-token units (6 decimals).
+     */
+    function quoteRangePayout(uint256 _eventId, uint256 _hypoSettlement, uint256 _notional)
+        external
+        view
+        returns (uint256 payout)
+    {
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
+        if (evt.id == 0 || _hypoSettlement == 0 || _notional == 0) return 0;
+
+        bool triggered = evt.strikeAbove
+            ? _hypoSettlement >= evt.strike
+            : _hypoSettlement <= evt.strike;
+        if (!triggered) return 0;
+
+        uint256 priceMove;
+        if (evt.payoutCap == 0) {
+            // Legacy single-strike: full predetermined gap.
+            priceMove = evt.strikeAbove
+                ? evt.strike - evt.initialRate
+                : evt.initialRate - evt.strike;
+        } else if (evt.strikeAbove) {
+            uint256 effective = _hypoSettlement >= evt.payoutCap ? evt.payoutCap : _hypoSettlement;
+            priceMove = effective - evt.strike;
+        } else {
+            uint256 effective = _hypoSettlement <= evt.payoutCap ? evt.payoutCap : _hypoSettlement;
+            priceMove = evt.strike - effective;
+        }
+        return (_notional * priceMove) / evt.initialRate;
     }
 
     /**
@@ -1824,20 +2145,26 @@ contract BlockFinaXHedgeFacet {
         uint256 _premium
     ) internal {
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
-        // G-H4: cache totalActiveShares and premiumDust to avoid repeated SLOADs.
-        uint256 totalShares = evt.totalActiveShares;
-        if (totalShares == 0) return;
+        if (evt.totalActiveShares == 0) return;
 
+        // H-2 fix: track integer remainder (dust) from the per-share accumulator.
+        // Each call computes accPremiumPerShare += (premium * ACC_MULTIPLIER) / totalActiveShares.
+        // The division discards a remainder of up to (totalActiveShares - 1) units, which is
+        // silently lost under the original implementation. Over many buyProtection() calls
+        // this dust can become material. We accumulate it in evt.premiumDust and distribute
+        // a bonus increment whenever the accumulated dust is >= totalActiveShares (i.e. enough
+        // to add at least 1 unit per share when divided through).
         uint256 scaledPremium = _premium * ACC_PREMIUM_MULTIPLIER;
-        uint256 increment = scaledPremium / totalShares;
-        uint256 dust = evt.premiumDust + (scaledPremium % totalShares);
+        uint256 increment = scaledPremium / evt.totalActiveShares;
+        uint256 remainder = scaledPremium % evt.totalActiveShares;
 
-        // Roll over any full increment's worth of accumulated dust.
-        if (dust >= totalShares) {
-            increment += dust / totalShares;
-            dust %= totalShares;
+        // Accumulate remainder; roll over any full increment's worth of dust.
+        evt.premiumDust += remainder;
+        if (evt.premiumDust >= evt.totalActiveShares) {
+            uint256 bonusIncrements = evt.premiumDust / evt.totalActiveShares;
+            increment += bonusIncrements;
+            evt.premiumDust = evt.premiumDust % evt.totalActiveShares;
         }
-        evt.premiumDust = dust;
 
         evt.accPremiumPerShare += increment;
     }

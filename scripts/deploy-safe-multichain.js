@@ -103,7 +103,8 @@ async function main() {
   console.log(`\nNext: deploy Diamond with SAFE_ADDR=${safeAddress}`);
   console.log(`  npx hardhat run scripts/deploy-v3-fixed.js --network ${network.name}`);
 
-  const outFile = `deployments-safe-${network.name}.json`;
+  fs.mkdirSync("deployments", { recursive: true });
+  const outFile = `deployments/deployments-safe-${network.name}.json`;
   const out = {
     network:    network.name,
     chainId,
