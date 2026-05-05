@@ -3,6 +3,8 @@ pragma solidity 0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {LibAppStorage} from "../libraries/LibAppStorage.sol";
 import {LibDiamond} from "../libraries/LibDiamond.sol";
 
@@ -68,6 +70,13 @@ contract BlockFinaXHedgeFacet {
     ///        accPremiumPerShare += 1e6 * 1e18 / 1e20 = 1e4  (no precision loss)
     ///      Safe from overflow: max shares (~1e22) * max acc (~1e16) = 1e38 << uint256 max.
     uint256 constant ACC_PREMIUM_MULTIPLIER = 1e18;
+
+    /// @dev Maximum age of a pricing-engine quote signature, in seconds. A quote signed
+    ///      more than this long ago is rejected — protects against an attacker hoarding
+    ///      old signatures and replaying them after market conditions have moved.
+    ///      120s is enough headroom for slow Lisk/Base/BSC blocks plus user click latency
+    ///      while still bounding the exposure window if the engine key is compromised.
+    uint256 constant QUOTE_MAX_AGE_SECONDS = 120;
 
     // ============================================================
     //                          EVENTS
@@ -191,6 +200,13 @@ contract BlockFinaXHedgeFacet {
 
     /// @notice Emitted when expired unclaimed payouts are recovered by the owner after the grace period.
     event ExpiredPayoutsRecovered(uint256 indexed eventId, uint256 amount);
+
+    /// @notice Emitted when the on-chain pricing-engine signer address is set or rotated.
+    /// @dev    Setting `_signer` to address(0) DISABLES signature checks and reverts the
+    ///         protocol to legacy mode where any premium can be passed in createEvent().
+    ///         Setting it to a non-zero address ENFORCES signature verification on every
+    ///         subsequent createEvent() call.
+    event PricingEngineSignerSet(address indexed previousSigner, address indexed newSigner);
 
     // ============================================================
     //                       MODIFIERS
@@ -318,6 +334,45 @@ contract BlockFinaXHedgeFacet {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         s.hedgeOracleAdmin = _admin;
         emit OracleAdminSet(_admin);
+    }
+
+    /**
+     * @notice Set or rotate the pricing-engine ECDSA signer.
+     * @dev When the signer is the zero address, signature verification in createEvent()
+     *      is disabled and any premium can be submitted (legacy / migration mode).
+     *      When set to a non-zero address, every subsequent createEvent() MUST carry
+     *      a valid ECDSA signature recoverable to this address.
+     *
+     *      Rotation: previously issued quotes signed by the old key become invalid
+     *      immediately after this call returns. Operators should pre-warn integrators
+     *      before rotating.
+     *
+     *      The QUOTE_MAX_AGE_SECONDS freshness window means a stolen key can be abused
+     *      for at most ~2 minutes before the operator notices and rotates.
+     *
+     * @param _signer New pricing-engine public address. address(0) disables verification.
+     */
+    function setPricingEngineSigner(address _signer) external onlyOwner {
+        LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
+        emit PricingEngineSignerSet(s.pricingEngineSigner, _signer);
+        s.pricingEngineSigner = _signer;
+    }
+
+    /**
+     * @notice Returns the currently registered pricing-engine signer address.
+     * @return Zero address if signature verification is disabled, else the active signer.
+     */
+    function getPricingEngineSigner() external view returns (address) {
+        return LibAppStorage.appStorage().pricingEngineSigner;
+    }
+
+    /**
+     * @notice Returns true if a quote nonce has already been consumed by createEvent().
+     * @dev    Useful for off-chain callers to defensively check before submitting.
+     *         The contract enforces uniqueness regardless of whether this is queried.
+     */
+    function isQuoteNonceUsed(bytes32 _nonce) external view returns (bool) {
+        return LibAppStorage.appStorage().usedQuoteNonces[_nonce];
     }
 
     /**
@@ -721,6 +776,20 @@ contract BlockFinaXHedgeFacet {
         uint256 initialRate;
         bool strikeAbove;
         address paymentToken;
+
+        // ── v8: pricing-engine attestation (required when pricingEngineSigner is set) ──
+        // The signature is recovered against:
+        //   keccak256(abi.encode(
+        //     block.chainid, address(this), msg.sender,
+        //     underlying, strike, payoutCap, premiumRate, expiryDate, initialRate, strikeAbove,
+        //     quoteTimestamp, quoteNonce
+        //   ))
+        // wrapped with the EIP-191 "Ethereum Signed Message" prefix (so the signing key can
+        // use a standard wallet `personal_sign`). Pass an empty bytes signature and zero
+        // values when the signer is unset (legacy mode).
+        bytes signature;
+        uint256 quoteTimestamp;
+        bytes32 quoteNonce;
     }
 
     /**
@@ -829,6 +898,11 @@ contract BlockFinaXHedgeFacet {
             require(s.allowedPaymentTokens[token], "Payment token not whitelisted");
         }
 
+        // --- v8: verify pricing-engine quote signature ---
+        // When s.pricingEngineSigner is unset (address(0)), legacy mode: any premium accepted.
+        // When set, every event MUST carry a fresh, unique, valid signature from that signer.
+        address recoveredQuoteSigner = _verifyQuoteSignature(s, _params);
+
         // --- Effects ---
         uint256 creationFee = s.hedgeFeeConfig.eventCreationFee;
         s.hedgePlatformFeesCollected += creationFee;
@@ -838,7 +912,7 @@ contract BlockFinaXHedgeFacet {
         // totalHedgeEvents is kept in storage for layout compatibility but always equals
         // hedgeEventCounter; getTotalHedgeEvents() reads hedgeEventCounter directly.
 
-        _initHedgeEvent(s, eventId, _params, token);
+        _initHedgeEvent(s, eventId, _params, token, recoveredQuoteSigner);
 
         uint256 depositId = _createInitialDeposit(s, eventId, _params.initialLiquidity);
 
@@ -861,13 +935,75 @@ contract BlockFinaXHedgeFacet {
         return eventId;
     }
 
+    /// @dev Verify the pricing-engine quote signature in CreateEventParams.
+    ///      Returns the recovered signer address (which equals s.pricingEngineSigner on
+    ///      success) when the signer is set, or address(0) when verification is skipped
+    ///      (legacy mode, signer unset). Always reverts on bad signature when verification
+    ///      is active.
+    ///
+    ///      The signed payload deliberately includes EVERY parameter that affects the
+    ///      premium math, plus chain + diamond + caller for context-binding:
+    ///        - block.chainid + address(this) prevent cross-chain / cross-diamond replay
+    ///        - msg.sender prevents quote-stealing (Alice can't use Bob's quote)
+    ///        - underlying / strike / payoutCap / premiumRate / expiryDate / initialRate / strikeAbove
+    ///          ensures the signature covers exactly the event the engine quoted
+    ///        - quoteTimestamp + quoteNonce: freshness + replay protection
+    function _verifyQuoteSignature(
+        LibAppStorage.AppStorage storage s,
+        CreateEventParams memory _params
+    ) internal returns (address) {
+        if (s.pricingEngineSigner == address(0)) {
+            // Legacy mode — verification disabled. Caller may pass anything (or nothing).
+            return address(0);
+        }
+
+        require(_params.signature.length == 65, "Quote signature missing or wrong length");
+        require(_params.quoteTimestamp > 0, "Quote timestamp required");
+        require(_params.quoteNonce != bytes32(0), "Quote nonce required");
+        require(
+            block.timestamp <= _params.quoteTimestamp + QUOTE_MAX_AGE_SECONDS,
+            "Quote expired (signed > 120s ago)"
+        );
+        require(
+            _params.quoteTimestamp <= block.timestamp,
+            "Quote timestamp in future"
+        );
+        require(!s.usedQuoteNonces[_params.quoteNonce], "Quote nonce already used");
+
+        bytes32 messageHash = keccak256(abi.encode(
+            block.chainid,
+            address(this),
+            msg.sender,
+            _params.underlying,
+            _params.strike,
+            _params.payoutCap,
+            _params.premiumRate,
+            _params.expiryDate,
+            _params.initialRate,
+            _params.strikeAbove,
+            _params.quoteTimestamp,
+            _params.quoteNonce
+        ));
+        bytes32 ethSignedHash = MessageHashUtils.toEthSignedMessageHash(messageHash);
+
+        address recovered = ECDSA.recover(ethSignedHash, _params.signature);
+        require(recovered == s.pricingEngineSigner, "Invalid pricing-engine signature");
+
+        // Mark consumed BEFORE returning so a re-entrant call inside the same tx
+        // (shouldn't be possible, but defence-in-depth) cannot reuse it.
+        s.usedQuoteNonces[_params.quoteNonce] = true;
+        return recovered;
+    }
+
     /// @dev Initialises the HedgeEvent storage struct and registers the creator's event ID.
     ///      `_resolvedToken` is the final payment token address already validated by createEvent().
+    ///      `_quoteSigner` is the recovered pricing-engine signer (or address(0) in legacy mode).
     function _initHedgeEvent(
         LibAppStorage.AppStorage storage s,
         uint256 eventId,
         CreateEventParams memory _params,
-        address _resolvedToken
+        address _resolvedToken,
+        address _quoteSigner
     ) internal {
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[eventId];
         evt.id = eventId;
@@ -885,6 +1021,7 @@ contract BlockFinaXHedgeFacet {
         evt.initialRate = _params.initialRate;
         evt.strikeAbove = _params.strikeAbove;
         evt.payoutCap = _params.payoutCap;
+        evt.quoteSigner = _quoteSigner;
         evt.createdAt = block.timestamp;
         // Store the resolved token. For USDC events this is s.usdcToken; zero address is
         // never stored here — the resolution already happened in createEvent().
@@ -1710,6 +1847,19 @@ contract BlockFinaXHedgeFacet {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
         return (evt.strike, evt.payoutCap, evt.initialRate, evt.strikeAbove);
+    }
+
+    /**
+     * @notice Returns the pricing-engine signer that authorised this event's premium.
+     * @dev    Zero address means the event was created in legacy mode (no signer set
+     *         globally at the time of createEvent). A non-zero value means the event
+     *         premium was cryptographically attested by that signer.
+     *
+     *         Frontends should display a "Fair-Priced ✓" badge when this is non-zero
+     *         AND equals the current global pricingEngineSigner.
+     */
+    function getEventQuoteSigner(uint256 _eventId) external view returns (address) {
+        return LibAppStorage.appStorage().hedgeEvents[_eventId].quoteSigner;
     }
 
     /**

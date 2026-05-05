@@ -115,6 +115,44 @@ describe("Diamond — cut & loupe machinery", function () {
       expect(await loupe.facetAddress(magicSelector)).to.equal(await v2.getAddress());
     });
 
+    it("regression: Replace into a brand-new facet REGISTERS it in facetAddresses[]", async function () {
+      // This test pins the LibDiamond.replaceFunctions fix. Pre-fix, when a Replace cut
+      // moved selectors to a facet address that wasn't already in facetAddresses[],
+      // the new address was NEVER added — selector routing worked but the Loupe lied.
+      // We ran into this in production after the v8 upgrade and had to do a corrective
+      // Remove+Add cut on three mainnet Diamonds (see scripts/rebuild-facet-table.js).
+      // After the fix, Replace into a new facet address must push that address into
+      // facetAddresses[] just like Add does.
+
+      const { signers, addresses, loupe } = await loadFixture(deployDiamondFixture);
+      const v1 = await deployTestFacet("TestPureFacet");
+      const cutAt = await ethers.getContractAt("BlockFinaXDiamondCutFacet", addresses.diamond);
+
+      // Step 1: Add v1 with one selector. Now v1's address IS in facetAddresses[].
+      const sel = v1.interface.getFunction("getMagicNumber").selector;
+      await cutAt.connect(signers.owner).diamondCut(
+        [{ facetAddress: await v1.getAddress(), action: ACTION.Add, functionSelectors: [sel] }],
+        ethers.ZeroAddress, "0x",
+      );
+      const v1Addr = (await v1.getAddress()).toLowerCase();
+      let addrs = (await loupe.facetAddresses()).map(a => a.toLowerCase());
+      expect(addrs.includes(v1Addr)).to.equal(true);
+
+      // Step 2: deploy a brand-new v2 and Replace. The v2 address is NEW to the Diamond.
+      const v2 = await deployTestFacet("TestPureFacetV2");
+      const v2Addr = (await v2.getAddress()).toLowerCase();
+      await cutAt.connect(signers.owner).diamondCut(
+        [{ facetAddress: await v2.getAddress(), action: ACTION.Replace, functionSelectors: [sel] }],
+        ethers.ZeroAddress, "0x",
+      );
+
+      // The selector must route to v2 ...
+      expect((await loupe.facetAddress(sel)).toLowerCase()).to.equal(v2Addr);
+      // ... AND v2's address must now be in facetAddresses[] (this is what the bug fix asserts).
+      addrs = (await loupe.facetAddresses()).map(a => a.toLowerCase());
+      expect(addrs.includes(v2Addr)).to.equal(true);
+    });
+
     it("reverts when replacing a selector with the same facet (no-op cut)", async function () {
       const { signers, addresses } = await loadFixture(deployDiamondFixture);
       const v1 = await deployTestFacet("TestPureFacet");

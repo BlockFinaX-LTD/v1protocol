@@ -190,6 +190,14 @@ function buildEventParams(overrides = {}) {
     initialRate:       rate(10),               // current spot
     strikeAbove:       true,                   // upward hedge
     paymentToken:      ethers.ZeroAddress,     // = default usdcToken
+
+    // ── v8 signature fields ─────────────────────────────────────────────
+    // Default to empty values, valid only when the Diamond's pricingEngineSigner
+    // is unset (legacy mode). Tests that exercise the signed-quote path should
+    // override these via signEventParams() in test/helpers/signQuote.js.
+    signature:         "0x",
+    quoteTimestamp:    0n,
+    quoteNonce:        ethers.ZeroHash,
   };
   return { ...defaults, ...overrides };
 }
@@ -201,10 +209,24 @@ async function openPool(hedge, creator, eventId, allowExternalLp = true) {
   await hedge.connect(creator).setPoolSettings(eventId, true, allowExternalLp);
 }
 
+/**
+ * Generate a random pricing-engine signer wallet AND register it on the Diamond.
+ * Returns the wallet so tests can use it to sign quotes.
+ *
+ * Use this to opt INTO signature-required mode for a test. Tests that don't call
+ * this stay in legacy mode (signer = address(0), createEvent accepts unsigned params).
+ */
+async function setupPricingEngineSigner(hedge, owner) {
+  const signerWallet = ethers.Wallet.createRandom();
+  await hedge.connect(owner).setPricingEngineSigner(signerWallet.address);
+  return signerWallet;
+}
+
 module.exports = {
   deployDiamondFixture,
   buildEventParams,
   openPool,
+  setupPricingEngineSigner,
   getSelectors,
   PRECISION,
   ONE_USDC,

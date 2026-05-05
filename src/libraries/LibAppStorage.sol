@@ -179,6 +179,18 @@ library LibAppStorage {
         ///      No live events exist at v7 cut time, so the legacy branch is essentially
         ///      dead code retained only for forward-compatibility safety.
         uint256 payoutCap;
+
+        // ── v8 additions: pricing-engine attestation ───────────────────────────────────────
+        // Always append at end to preserve Diamond storage layout.
+
+        /// @dev Recovered ECDSA signer of the pricing-engine quote that authorised this event.
+        ///      address(0) means the event was created without a quote attestation (allowed
+        ///      only when the global pricingEngineSigner is unset; once set, every new event
+        ///      MUST carry a valid signature and this field will equal pricingEngineSigner).
+        ///
+        ///      Anyone reading the event can independently verify "this premium was blessed
+        ///      by the pricing engine" by checking quoteSigner != 0.
+        address quoteSigner;
     }
 
     /**
@@ -374,6 +386,25 @@ library LibAppStorage {
         ///      IERC20.balanceOf(address(this)) to prevent donation / re-entrancy attacks
         ///      where an attacker inflates the on-chain balance to manipulate fee recovery.
         mapping(address => uint256) tokenReserves;
+
+        // ============================================================
+        //                    v8: PRICING-ENGINE ATTESTATION
+        // ============================================================
+
+        /// @dev ECDSA public key of the off-chain pricing engine. Set via
+        ///      setPricingEngineSigner() (owner-only). When zero, signature verification
+        ///      is disabled and createEvent() accepts events without quote attestation
+        ///      (legacy / migration mode). When non-zero, every createEvent() MUST carry
+        ///      a valid signature from this signer.
+        ///
+        ///      Rotate by calling setPricingEngineSigner() with a new address. Previously
+        ///      issued quotes with the old signer become invalid immediately on rotation.
+        address pricingEngineSigner;
+
+        /// @dev Replay-protection set: every quote nonce that has been consumed by
+        ///      createEvent(). The pricing engine generates fresh 32-byte nonces per
+        ///      quote; the contract marks each one used the first time it's submitted.
+        mapping(bytes32 => bool) usedQuoteNonces;
     }
 
     /**

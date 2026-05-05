@@ -108,6 +108,16 @@ library LibDiamond {
         require(_functionSelectors.length > 0, "LibDiamondCut: No selectors in facet to cut");
         DiamondStorage storage ds = diamondStorage();
         require(_facetAddress != address(0), "LibDiamondCut: Replace facet can't be address(0)");
+        // Bug fix: when a Replace cut routes selectors into a brand-new facet address
+        // for the first time, push that address into ds.facetAddresses[] so the Loupe
+        // (`facetAddresses()`, `facets()`) reflects reality. Without this, the new
+        // facet serves selectors correctly but is invisible to introspection — see the
+        // v8 upgrade post-mortem in docs/upgrades/v7-range-product-upgrade.md.
+        // Mirrors the same check at the top of addFunctions() below.
+        uint96 selectorPosition = uint96(ds.facetFunctionSelectors[_facetAddress].length);
+        if (selectorPosition == 0) {
+            addFacet(ds, _facetAddress);
+        }
         for (uint256 selectorIndex; selectorIndex < _functionSelectors.length; selectorIndex++) {
             bytes4 selector = _functionSelectors[selectorIndex];
             address oldFacetAddress = ds.selectorToFacetAndPosition[selector];

@@ -66,8 +66,9 @@ async function main() {
   console.log("Blockscout: https://blockscout.lisk.com/address/" + safeAddress);
 
   const out = { safeAddress, owners: [OWNER_1, OWNER_2], threshold: THRESHOLD, txHash: tx.hash, deployedAt: new Date().toISOString() };
-  fs.writeFileSync("deployments-safe-liskMainnet.json", JSON.stringify(out, null, 2));
-  console.log("\nSaved to deployments-safe-liskMainnet.json");
+  fs.mkdirSync("deployments", { recursive: true });
+  fs.writeFileSync("deployments/deployments-safe-liskMainnet.json", JSON.stringify(out, null, 2));
+  console.log("\nSaved to deployments/deployments-safe-liskMainnet.json");
 }
 
 main().catch(e => { console.error(e.message); process.exit(1); });

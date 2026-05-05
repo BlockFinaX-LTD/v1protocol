@@ -30,12 +30,18 @@ async function main() {
   const key2 = process.env.SAFE_OWNER_KEY_2;
   if (!key1 || !key2) throw new Error("Set SAFE_OWNER_KEY_1 and SAFE_OWNER_KEY_2 env vars");
 
-  // Load deployment file for this network
-  const files = fs.readdirSync(".").filter(f =>
-    f.startsWith(`deployments-v3-fixed-${network.name}-`) && f.endsWith(".json")
-  );
-  if (files.length === 0) throw new Error(`No deployment file found for network: ${network.name}`);
-  const deployFile = files.sort().pop();
+  // Load deployment file for this network. The v3-fixed files are now in deployments/_archive/
+  // (kept for historical reference). New deployments live in deployments/.
+  const searchDirs = ["deployments/_archive", "deployments", "."];
+  let deployFile = null;
+  for (const dir of searchDirs) {
+    if (!fs.existsSync(dir)) continue;
+    const files = fs.readdirSync(dir).filter(f =>
+      f.startsWith(`deployments-v3-fixed-${network.name}-`) && f.endsWith(".json")
+    );
+    if (files.length > 0) { deployFile = `${dir}/${files.sort().pop()}`; break; }
+  }
+  if (!deployFile) throw new Error(`No v3-fixed deployment file found for network ${network.name} in ${searchDirs.join(", ")}`);
   const deployment = JSON.parse(fs.readFileSync(deployFile, "utf8"));
 
   const DIAMOND = deployment.diamond;

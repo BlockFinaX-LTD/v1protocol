@@ -328,7 +328,8 @@ async function main() {
     timestamp: new Date().toISOString(),
   };
 
-  const filename = `deployments-diamond-${hre.network.name}.json`;
+  const filename = `deployments/deployments-diamond-${hre.network.name}.json`;
+  fs.mkdirSync("deployments", { recursive: true });
   fs.writeFileSync(filename, JSON.stringify(deploymentInfo, null, 2));
   console.log(`Deployment saved to ${filename}`);
 }

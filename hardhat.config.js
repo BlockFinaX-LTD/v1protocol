@@ -1,5 +1,10 @@
 require("@nomicfoundation/hardhat-toolbox");
-require("dotenv").config();
+const path = require("path");
+// Load secrets from the ROOT .env (DEPLOYER_PRIVATE_KEY, DIAMOND_ADDRESS, etc.)
+// rather than expecting a duplicate contracts/.env. Local contracts/.env (if present)
+// still wins because that's loaded second below.
+require("dotenv").config({ path: path.resolve(__dirname, "../.env") });
+require("dotenv").config(); // also try contracts/.env so per-contracts overrides still work
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
