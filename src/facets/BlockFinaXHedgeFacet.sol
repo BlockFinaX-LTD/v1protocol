@@ -936,10 +936,20 @@ contract BlockFinaXHedgeFacet {
     }
 
     /// @dev Verify the pricing-engine quote signature in CreateEventParams.
-    ///      Returns the recovered signer address (which equals s.pricingEngineSigner on
-    ///      success) when the signer is set, or address(0) when verification is skipped
-    ///      (legacy mode, signer unset). Always reverts on bad signature when verification
-    ///      is active.
+    ///      Three modes, all returning the address that gets stored in HedgeEvent.quoteSigner:
+    ///
+    ///        1. Legacy mode — pricingEngineSigner is unset on the diamond.
+    ///           Returns address(0). Caller may pass anything (or nothing).
+    ///        2. Engine-priced mode — signer set + valid 65-byte signature.
+    ///           Returns the recovered signer (== pricingEngineSigner). Hedgers can
+    ///           verify on-chain that the event used the platform's pricing engine.
+    ///        3. Self-priced mode — signer set + empty signature (length 0).
+    ///           Returns address(0). Records "creator opted out of engine pricing"
+    ///           so consumers can label the event "manually priced" in their UI.
+    ///           This makes engine pricing advisory rather than mandatory.
+    ///
+    ///      Always reverts on a malformed signature (non-zero, non-65 bytes) — that's
+    ///      almost always a bug, not an intentional override.
     ///
     ///      The signed payload deliberately includes EVERY parameter that affects the
     ///      premium math, plus chain + diamond + caller for context-binding:
@@ -953,11 +963,20 @@ contract BlockFinaXHedgeFacet {
         CreateEventParams memory _params
     ) internal returns (address) {
         if (s.pricingEngineSigner == address(0)) {
-            // Legacy mode — verification disabled. Caller may pass anything (or nothing).
+            // Mode 1 — legacy. Verification disabled, signature ignored.
             return address(0);
         }
 
-        require(_params.signature.length == 65, "Quote signature missing or wrong length");
+        // Mode 3 — empty signature is an explicit opt-out. The event is "self-priced"
+        // and getHedgeEvent will report quoteSigner == address(0). UIs use this to
+        // distinguish manually-priced events from engine-attested ones.
+        if (_params.signature.length == 0) {
+            return address(0);
+        }
+
+        // Mode 2 — signature provided; must be a valid 65-byte ECDSA sig and match
+        // the registered pricingEngineSigner. Anything else reverts.
+        require(_params.signature.length == 65, "Quote signature wrong length");
         require(_params.quoteTimestamp > 0, "Quote timestamp required");
         require(_params.quoteNonce != bytes32(0), "Quote nonce required");
         require(

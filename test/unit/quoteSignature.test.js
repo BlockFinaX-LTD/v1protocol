@@ -104,11 +104,29 @@ describe("HedgeFacet.createEvent — enforced mode (signer set)", function () {
     expect(await hedge.isQuoteNonceUsed(signed.quoteNonce)).to.equal(true);
   });
 
-  it("rejects empty signature", async function () {
+  it("accepts empty signature as explicit opt-out (self-priced) — quoteSigner stored as zero", async function () {
+    // Behaviour change: pricing-engine attestation is now ADVISORY, not mandatory.
+    // An event creator can choose their own premium and submit with signature = "0x".
+    // The contract records quoteSigner = address(0) so consumers can label the
+    // event "manually priced" vs "engine-attested".
+    const { hedge, signers } = await loadFixture(deployDiamondFixture);
+    const signerWallet = await setupPricingEngineSigner(hedge, signers.owner);
+    expect(await hedge.getPricingEngineSigner()).to.equal(signerWallet.address);   // signer IS set
+    await expect(hedge.connect(signers.creator).createEvent(buildEventParams())).to.not.be.reverted;
+    const eventId = await hedge.getTotalHedgeEvents();
+    expect(await hedge.getEventQuoteSigner(eventId)).to.equal(ethers.ZeroAddress); // self-priced marker
+  });
+
+  it("rejects malformed signature (wrong length, e.g. 64 bytes)", async function () {
+    // Anything between empty and 65 bytes is almost certainly a bug, not an opt-out.
+    // Reject explicitly so creators don't accidentally bypass attestation by sending
+    // a truncated sig.
     const { hedge, signers } = await loadFixture(deployDiamondFixture);
     await setupPricingEngineSigner(hedge, signers.owner);
-    await expect(hedge.connect(signers.creator).createEvent(buildEventParams()))
-      .to.be.revertedWith("Quote signature missing or wrong length");
+    const params = buildEventParams();
+    params.signature = "0x" + "ab".repeat(64);   // 64 bytes — too short for ECDSA
+    await expect(hedge.connect(signers.creator).createEvent(params))
+      .to.be.revertedWith("Quote signature wrong length");
   });
 
   it("rejects signature signed by the wrong key", async function () {
