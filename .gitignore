@@ -1,0 +1,25 @@
+# dependencies
+node_modules/
+
+# env / secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Hardhat build artifacts
+artifacts/
+cache/
+cache-lisk/
+typechain/
+typechain-types/
+
+# coverage
+coverage/
+coverage.json
+
+# editor
+.vscode/
+.idea/
+*.swp
+*.DS_Store
