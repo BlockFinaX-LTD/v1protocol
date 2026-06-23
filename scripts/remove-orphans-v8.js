@@ -17,7 +17,6 @@ const hre = require("hardhat");
 const { ethers } = hre;
 
 const CHAIN_DIAMOND_ENV = {
-  1135: "DIAMOND_ADDRESS",
   8453: "BASE_DIAMOND_ADDRESS",
   56:   "BSC_DIAMOND_ADDRESS",
 };

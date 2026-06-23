@@ -6,7 +6,7 @@
  *
  * Usage (from the contracts/ directory):
  *   DEPLOYER_PRIVATE_KEY=0x... DIAMOND_ADDRESS=0x3582D8f5f88ef557ce10Af26834FAC8B8e1445bf \
- *     npx hardhat run scripts/set-creation-fee.js --network liskSepolia
+ *     npx hardhat run scripts/set-creation-fee.js --network baseSepolia
  */
 
 const hre = require("hardhat");

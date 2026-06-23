@@ -20,7 +20,7 @@ const PRECISION = 10n ** 6n;          // 1e6 — fee/percentage denominator
 const USDC_DECIMALS = 6;              // payment token decimals
 const ONE_USDC = 10n ** BigInt(USDC_DECIMALS); // 1 USDC in raw units
 
-// Default fee config used in tests. Mirrors the Lisk/Base mainnet default in deploy-diamond.js.
+// Default fee config used in tests. Mirrors the Base mainnet default in deploy-diamond.js.
 const DEFAULT_FEES = {
   eventCreationFee:    25n * ONE_USDC, // $25
   hedgerFeeRate:        5_000n,        // 0.5%

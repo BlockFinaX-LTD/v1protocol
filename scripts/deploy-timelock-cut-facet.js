@@ -1,4 +1,4 @@
-const { ethers } = require("hardhat");
+const { ethers, network } = require("hardhat");
 const fs = require("fs");
 
 async function main() {
@@ -17,11 +17,9 @@ async function main() {
 
   const result = { timelockCutFacet: addr, deployedAt: new Date().toISOString() };
   fs.mkdirSync("deployments", { recursive: true });
-  fs.writeFileSync(
-    "deployments/deployments-timelock-cut-liskMainnet.json",
-    JSON.stringify(result, null, 2)
-  );
-  console.log("\nSaved to deployments/deployments-timelock-cut-liskMainnet.json");
+  const outFile = `deployments/deployments-timelock-cut-${network.name}.json`;
+  fs.writeFileSync(outFile, JSON.stringify(result, null, 2));
+  console.log("\nSaved to", outFile);
   console.log("\nNext step: install this facet on the Diamond via the /install-timelock page.");
 }
 

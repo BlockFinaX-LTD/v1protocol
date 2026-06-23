@@ -20,14 +20,13 @@
  *
  * Usage:
  *   NEW_HEDGE_FACET=0x... NEW_ORACLE_FACET=0x... \
- *     npx hardhat run scripts/rebuild-facet-table.js --network <lisk|base|bsc>
+ *     npx hardhat run scripts/rebuild-facet-table.js --network <base|bsc>
  */
 
 const hre = require("hardhat");
 const { ethers } = hre;
 
 const CHAIN_DIAMOND_ENV = {
-  1135: "DIAMOND_ADDRESS",
   8453: "BASE_DIAMOND_ADDRESS",
   56:   "BSC_DIAMOND_ADDRESS",
 };
@@ -35,7 +34,6 @@ const CHAIN_DIAMOND_ENV = {
 // Facet addresses per chain — pre-populated so this script needs no env vars
 // in the common case (just point at the right network).
 const FACET_DEFAULTS = {
-  1135: { newHedge: "0xbd689fC24A3670B555b72843c4F6CcF170fa634f", newOracle: "0xD9F03c15571aD2E98AD373b1AFdF93C95aA392Ef" },
   8453: { newHedge: "0x9D7F9E4bEC2ddA2F778229048D5374233681fa6f", newOracle: "0x52cA9b99D9a01654505ED291d5df45E6109Cee6f" },
   56:   { newHedge: "0x2813e4a2Bd8d59A75db298a31e2b71191214F203", newOracle: "0x77964366e43a1f2311b04801F37BFb772F84b0F5" },
 };

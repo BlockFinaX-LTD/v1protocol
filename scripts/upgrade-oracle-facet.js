@@ -11,7 +11,7 @@
  *   - L002: locked pragma 0.8.20
  *
  * Usage:
- *   DIAMOND_ADDRESS=0x... npx hardhat run scripts/upgrade-oracle-facet.js --network liskSepolia
+ *   DIAMOND_ADDRESS=0x... npx hardhat run scripts/upgrade-oracle-facet.js --network baseSepolia
  */
 
 const hre = require("hardhat");

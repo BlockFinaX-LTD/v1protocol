@@ -17,7 +17,6 @@
  * Selector routing for diamondCut(...) is rewritten to point at the new bytecode.
  *
  * Usage:
- *   npx hardhat run scripts/upgrade-cut-facet.js --network lisk
  *   npx hardhat run scripts/upgrade-cut-facet.js --network base
  *   npx hardhat run scripts/upgrade-cut-facet.js --network bsc
  */
@@ -26,7 +25,6 @@ const hre = require("hardhat");
 const { ethers } = hre;
 
 const CHAIN_DIAMOND_ENV = {
-  1135: "DIAMOND_ADDRESS",
   8453: "BASE_DIAMOND_ADDRESS",
   56:   "BSC_DIAMOND_ADDRESS",
 };

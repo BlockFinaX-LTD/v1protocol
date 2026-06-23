@@ -74,7 +74,7 @@ contract BlockFinaXHedgeFacet {
     /// @dev Maximum age of a pricing-engine quote signature, in seconds. A quote signed
     ///      more than this long ago is rejected — protects against an attacker hoarding
     ///      old signatures and replaying them after market conditions have moved.
-    ///      120s is enough headroom for slow Lisk/Base/BSC blocks plus user click latency
+    ///      120s is enough headroom for slow Base/BSC blocks plus user click latency
     ///      while still bounding the exposure window if the engine key is compromised.
     uint256 constant QUOTE_MAX_AGE_SECONDS = 120;
 
