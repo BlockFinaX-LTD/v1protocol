@@ -27,6 +27,7 @@ const {
   deployDiamondFixture,
   buildEventParams,
   openPool,
+  warpPastExpiry,
   rate,
   ONE_USDC,
 } = require("../helpers/fixtures");
@@ -132,7 +133,8 @@ describe("E2E: multi-token (USDT alongside USDC) lifecycle", function () {
       expect(hUsdtBefore - await usdt.balanceOf(signers.hedger1.address)).to.equal(30n * ONE_USDT);
       expect(hUsdcBefore - await usdc.balanceOf(signers.hedger1.address)).to.equal(0n);
 
-      // Settle in the money (range mid).
+      // Settle in the money (range mid) — European: only at/after expiry.
+      await warpPastExpiry(hedge, eventId);
       await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(11.5));
 
       // Hedger claims — receives USDT.
@@ -228,7 +230,8 @@ describe("E2E: multi-token (USDT alongside USDC) lifecycle", function () {
       await hedge.connect(signers.hedger1).buyProtection(eventA, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
       await hedge.connect(signers.hedger2).buyProtection(eventB, 1_000n * ONE_USDT, MAX_UINT, FAR_FUTURE);
 
-      // Settle and claim each at the same range-mid price.
+      // Settle and claim each at the same range-mid price (European: at/after expiry).
+      await warpPastExpiry(hedge, eventB);
       await hedge.connect(signers.oracleAdmin).settleEvent(eventA, rate(11.5));
       await hedge.connect(signers.oracleAdmin).settleEvent(eventB, rate(11.5));
 

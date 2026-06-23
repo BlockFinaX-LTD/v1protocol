@@ -33,3 +33,29 @@ contract TestPureFacetV2 {
         return 100;
     }
 }
+
+/**
+ * @title TestInitFacet
+ * @notice Initializer target used to exercise the `_init` delegatecall branch of
+ *         LibDiamond.diamondCut() (initializeDiamondCut + enforceHasContractCode).
+ *         `init` succeeds; the two revert variants prove the error-propagation paths
+ *         (revert with reason string vs. revert with no return data).
+ *         Test-only; never deployed in production.
+ */
+contract TestInitFacet {
+    event Initialized(uint256 value);
+
+    function init(uint256 value) external {
+        emit Initialized(value);
+    }
+
+    function initRevertWithReason() external pure {
+        revert("init failed on purpose");
+    }
+
+    function initRevertNoReason() external pure {
+        assembly {
+            revert(0, 0)
+        }
+    }
+}

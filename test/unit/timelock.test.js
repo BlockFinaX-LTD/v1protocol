@@ -320,5 +320,36 @@ describe("BlockFinaXTimelockCutFacet", function () {
       const ids = await tl.getAllCutIds();
       expect(ids.length).to.equal(3);
     });
+
+    it("legacy views getPendingCutIds / getPendingCutInfo mirror the new getters", async function () {
+      const { signers, addresses } = await loadFixture(deployDiamondFixture);
+      const tl = await graduateToTimelock(signers, addresses.diamond);
+      const test = await deployTestFacet();
+
+      const tx = await tl.connect(signers.owner).diamondCut(
+        [{ facetAddress: await test.getAddress(), action: ACTION.Add, functionSelectors: getSelectors(test) }],
+        ethers.ZeroAddress, "0x",
+      );
+      const r = await tx.wait();
+      const proposalId = tl.interface.parseLog(r.logs.find(l => {
+        try { return tl.interface.parseLog(l)?.name === "CutProposed"; } catch { return false; }
+      })).args.proposalId;
+
+      // getPendingCutIds is the back-compat alias of getAllCutIds.
+      const pendingIds = await tl.getPendingCutIds();
+      expect(pendingIds.length).to.equal(1);
+      expect(pendingIds[0]).to.equal(proposalId);
+
+      // getPendingCutInfo returns (eta, executed, cancelled) for the proposal.
+      const info = await tl.getPendingCutInfo(proposalId);
+      expect(info.eta).to.be.gt(0n);
+      expect(info.executed).to.equal(false);
+      expect(info.cancelled).to.equal(false);
+
+      // After cancelling, the legacy info reflects it.
+      await tl.connect(signers.owner).cancelCut(proposalId);
+      const info2 = await tl.getPendingCutInfo(proposalId);
+      expect(info2.cancelled).to.equal(true);
+    });
   });
 });

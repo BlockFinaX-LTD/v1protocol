@@ -38,12 +38,13 @@
  */
 
 const { expect } = require("chai");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-network-helpers");
+const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 const { ethers } = require("hardhat");
 const {
   deployDiamondFixture,
   buildEventParams,
   openPool,
+  warpPastExpiry,
   rate,
   ONE_USDC,
 } = require("../helpers/fixtures");
@@ -83,6 +84,11 @@ async function fullSetup() {
   // Baker buys $1K of protection.
   await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
 
+  // European settlement: jump past expiry so every scenario below can settle. The trigger
+  // is judged purely on the settlement price the oracle posts, so the payout math is
+  // unchanged — we simply can no longer settle "early".
+  await warpPastExpiry(hedge, eventId);
+
   return { ...ctx, eventId };
 }
 
@@ -99,9 +105,7 @@ describe("E2E: Baker scenario — three settlement outcomes", function () {
         lp1:     await usdc.balanceOf(signers.lp1.address),
       };
 
-      // Settle below strike. Need to skip past expiry first because strike wasn't touched.
-      const core = await hedge.getHedgeEventCore(eventId);
-      await time.increaseTo(Number(core.expiryDate) + 1);
+      // Settle below strike (already past expiry from fullSetup).
       await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(10.5));
 
       // Baker tries to claim — should revert (not eligible).

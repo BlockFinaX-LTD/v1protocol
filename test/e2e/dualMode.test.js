@@ -19,12 +19,13 @@
  */
 
 const { expect } = require("chai");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-network-helpers");
+const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 const { ethers } = require("hardhat");
 const {
   deployDiamondFixture,
   buildEventParams,
   openPool,
+  warpPastExpiry,
   rate,
   ONE_USDC,
 } = require("../helpers/fixtures");
@@ -82,7 +83,8 @@ describe("E2E: dual-mode coexistence — single-strike + range in same Diamond",
     await hedge.connect(signers.lp2).deposit(event2, 5_000n * ONE_USDC);
     await hedge.connect(signers.hedger2).buyProtection(event2, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
 
-    // Both settle at 11.5.
+    // Both settle at 11.5 (European: only possible at/after expiry).
+    await warpPastExpiry(hedge, event2);
     await hedge.connect(signers.oracleAdmin).settleEvent(event1, rate(11.5));
     await hedge.connect(signers.oracleAdmin).settleEvent(event2, rate(11.5));
 
@@ -128,7 +130,8 @@ describe("E2E: dual-mode coexistence — single-strike + range in same Diamond",
     await openPool(hedge, signers.lp1, event2);
     await hedge.connect(signers.hedger2).buyProtection(event2, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
 
-    // Both settle at 11.5.
+    // Both settle at 11.5 (European: only possible at/after expiry).
+    await warpPastExpiry(hedge, event2);
     await hedge.connect(signers.oracleAdmin).settleEvent(event1, rate(11.5));
     await hedge.connect(signers.oracleAdmin).settleEvent(event2, rate(11.5));
     await hedge.connect(signers.hedger1).claimPayout((await hedge.getEventPositionIds(event1))[0]);
