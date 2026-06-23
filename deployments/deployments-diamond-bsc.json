@@ -6,8 +6,8 @@
   "facets": {
     "blockFinaXDiamondCut": "0xAEcE90e767E257dE7cd9C6E1e93cEb880575C394",
     "blockFinaXDiamondLoupe": "0x8dD38f78a34b12f967c635252FB03b2f055988f6",
-    "blockFinaXHedge": "0x94e1436180C4c577D98e769D1830F39f62F0b122",
-    "blockFinaXOracle": "0x090a3cC9A71e2272f6a681C2bA940C71D36c239f"
+    "blockFinaXHedge": "0xB3900b754B3AE67bC1b0E13F7806A5D896636F90",
+    "blockFinaXOracle": "0xe5e1a1C5942dab29070A62e69310fdcBA6aA92D4"
   },
   "config": {
     "paymentToken": "0x55d398326f99059fF775485246999027B3197955",
