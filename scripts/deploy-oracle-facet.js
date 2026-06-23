@@ -10,7 +10,7 @@
  *
  * Usage:
  *   DIAMOND_ADDRESS=0x... ORACLE_A=0x... ORACLE_B=0x... ORACLE_C=0x... \
- *     npx hardhat run scripts/deploy-oracle-facet.js --network liskSepolia
+ *     npx hardhat run scripts/deploy-oracle-facet.js --network baseSepolia
  *
  * Required env vars:
  *   DEPLOYER_PRIVATE_KEY  — Diamond owner wallet

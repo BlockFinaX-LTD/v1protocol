@@ -19,12 +19,10 @@
  *
  * Optional env vars:
  *   ORACLE_A / ORACLE_B / ORACLE_C  — oracle node wallet addresses (no private keys here)
- *   USDC_LISK_MAINNET               — override USDC address for Lisk Mainnet (chainId 1135)
- *                                     Verify at https://blockscout.lisk.com before deploying
  *
  * Usage:
- *   npx hardhat run scripts/deploy-diamond.js --network liskSepolia
- *   npx hardhat run scripts/deploy-diamond.js --network lisk
+ *   npx hardhat run scripts/deploy-diamond.js --network baseSepolia
+ *   npx hardhat run scripts/deploy-diamond.js --network base
  */
 
 const hre = require("hardhat");
@@ -39,12 +37,10 @@ function getSelectors(contract) {
     .map(f => contract.interface.getFunction(f.name).selector);
 }
 
-/** Payment token per chain (USDC on Lisk/Base, USDT on BSC). */
+/** Payment token per chain (USDC on Base, USDT on BSC). */
 const PAYMENT_TOKEN_ADDRESSES = {
   84532: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // Base Sepolia USDC
-  4202:  "0xf52Ad63619Bf9cFeF510341ac6b4038554399562", // Lisk Sepolia USDC
   8453:  "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // Base Mainnet USDC
-  1135:  "0xF242275d3a6527d877f2c927a82D9b057609cc71", // Lisk Mainnet USDC
   56:    "0x55d398326f99059fF775485246999027B3197955", // BSC Mainnet USDT (18 dec)
   97:    "0x337610d27c682E347C9cD60BD4b3b107C9d34aeB", // BSC Testnet USDT
 };

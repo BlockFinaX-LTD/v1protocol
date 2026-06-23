@@ -17,7 +17,7 @@
  * Usage (testnet — all keys available):
  *   SAFE_ADDRESS=0x... DIAMOND_ADDRESS=0x... ACTION=acceptOwnership \
  *   SIGNER_A_KEY=0x... SIGNER_B_KEY=0x... \
- *     npx hardhat run scripts/safe-create-tx.js --network liskSepolia
+ *     npx hardhat run scripts/safe-create-tx.js --network baseSepolia
  */
 
 const hre = require("hardhat");

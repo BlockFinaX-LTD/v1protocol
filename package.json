@@ -5,13 +5,15 @@
   "scripts": {
     "compile": "hardhat compile",
     "test": "hardhat test",
-    "deploy:testnet": "hardhat run scripts/deploy-diamond.js --network liskSepolia",
-    "deploy:mainnet": "hardhat run scripts/deploy-diamond.js --network lisk",
-    "upgrade:hedge": "hardhat run scripts/upgrade-hedge-v8.js --network liskSepolia",
-    "upgrade:hedge:lisk": "hardhat run scripts/upgrade-hedge-v8.js --network lisk",
+    "deploy:testnet": "hardhat run scripts/deploy-diamond.js --network baseSepolia",
+    "deploy:mainnet": "hardhat run scripts/deploy-diamond.js --network base",
     "upgrade:hedge:base": "hardhat run scripts/upgrade-hedge-v8.js --network base",
     "upgrade:hedge:bsc": "hardhat run scripts/upgrade-hedge-v8.js --network bsc",
     "set-pricing-signer": "hardhat run scripts/set-pricing-signer.js",
+    "transfer-ownership:base": "hardhat run scripts/transfer-ownership.js --network base",
+    "transfer-ownership:bsc": "hardhat run scripts/transfer-ownership.js --network bsc",
+    "governance:install:base": "hardhat run scripts/install-multisig-governance.js --network base",
+    "governance:install:bsc": "hardhat run scripts/install-multisig-governance.js --network bsc",
     "verify": "hardhat verify"
   },
   "devDependencies": {

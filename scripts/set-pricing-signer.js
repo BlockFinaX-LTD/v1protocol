@@ -10,7 +10,6 @@
  *                                     PRICING_ENGINE_PRIVATE_KEY in the root .env
  *
  * Usage:
- *   npx hardhat run scripts/set-pricing-signer.js --network lisk
  *   npx hardhat run scripts/set-pricing-signer.js --network base
  *   npx hardhat run scripts/set-pricing-signer.js --network bsc
  */
@@ -19,7 +18,6 @@ const hre = require("hardhat");
 const { ethers } = hre;
 
 const CHAIN_DIAMOND_ENV = {
-  1135: "DIAMOND_ADDRESS",
   8453: "BASE_DIAMOND_ADDRESS",
   56:   "BSC_DIAMOND_ADDRESS",
 };

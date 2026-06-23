@@ -1,15 +1,14 @@
 /**
  * set-fee-new-diamonds.js
- * Sets creation fee to $2 on Lisk and Base new diamonds directly (no Safe).
+ * Sets creation fee to $2 on the Base / BSC diamonds directly (no Safe).
  *
  * Usage:
- *   SAFE_OWNER_KEY_1=0x... npx hardhat run scripts/set-fee-new-diamonds.js --network lisk
  *   SAFE_OWNER_KEY_1=0x... npx hardhat run scripts/set-fee-new-diamonds.js --network base
+ *   SAFE_OWNER_KEY_1=0x... npx hardhat run scripts/set-fee-new-diamonds.js --network bsc
  */
 const hre = require("hardhat");
 
 const DIAMONDS = {
-  lisk: { address: "0x69cB5BA093e44B345B617f72a148Ee43c4a18465", decimals: 6 },
   base: { address: "0xbCC51E62C4948FD35ab505bd71804C849601e4Ef", decimals: 6 },
   bsc:  { address: "0xaC939C0897981Abc0711ec4e37527F13106180fc", decimals: 18 },
 };
@@ -23,7 +22,7 @@ async function main() {
   const { ethers, network } = hre;
   const netName = network.name;
   const cfg = DIAMONDS[netName];
-  if (!cfg) throw new Error(`Unsupported network: ${netName}. Use lisk, base, or bsc`);
+  if (!cfg) throw new Error(`Unsupported network: ${netName}. Use base or bsc`);
 
   const key = process.env.DEPLOYER_PRIVATE_KEY || process.env.SAFE_OWNER_KEY_1;
   if (!key) throw new Error("Set DEPLOYER_PRIVATE_KEY or SAFE_OWNER_KEY_1");

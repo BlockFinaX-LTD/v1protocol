@@ -14,7 +14,6 @@
  * Diamond proxy address is UNCHANGED. Frontend doesn't need to update CHAIN_DIAMOND_MAP.
  *
  * Usage:
- *   npx hardhat run scripts/upgrade-hedge-v8.js --network lisk
  *   npx hardhat run scripts/upgrade-hedge-v8.js --network base
  *   npx hardhat run scripts/upgrade-hedge-v8.js --network bsc
  *
@@ -30,7 +29,6 @@ const hre = require("hardhat");
 const { ethers } = hre;
 
 const CHAIN_DIAMOND_ENV = {
-  1135: "DIAMOND_ADDRESS",
   8453: "BASE_DIAMOND_ADDRESS",
   56:   "BSC_DIAMOND_ADDRESS",
 };

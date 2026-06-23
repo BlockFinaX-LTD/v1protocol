@@ -41,7 +41,6 @@ const EXPLORERS = {
   84532: "https://sepolia.basescan.org/address/",
   56:    "https://bscscan.com/address/",
   97:    "https://testnet.bscscan.com/address/",
-  1135:  "https://blockscout.lisk.com/address/",
 };
 
 async function main() {

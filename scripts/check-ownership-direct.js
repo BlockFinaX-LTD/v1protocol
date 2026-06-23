@@ -30,14 +30,12 @@ const CONTRACT_OWNER_SLOT = "0x" + (BigInt(DIAMOND_STORAGE_POSITION) + 4n).toStr
 const PENDING_OWNER_SLOT  = "0x" + (BigInt(DIAMOND_STORAGE_POSITION) + 5n).toString(16).padStart(64, "0");
 
 const CHAINS = [
-  { label: "Lisk", diamond: process.env.DIAMOND_ADDRESS,      rpc: process.env.LISK_RPC_URL || "https://rpc.api.lisk.com" },
   { label: "Base", diamond: process.env.BASE_DIAMOND_ADDRESS, rpc: process.env.BASE_RPC_URL || "https://mainnet.base.org" },
   { label: "BSC",  diamond: process.env.BSC_DIAMOND_ADDRESS,  rpc: process.env.BSC_RPC_URL  || "https://bsc-dataseed.binance.org" },
 ];
 
 const DEPLOYER_ADDR = "0xef5Bed7c221c85A2c88e3c0223ee45482d6F037d";  // from earlier deployment files
 const KNOWN = {
-  lisk: { safe: "0xfce89FA90Ee1C78B15eE0f12f62B03153814699D", deployer: DEPLOYER_ADDR },
   base: { safe: "0x7909a2f1fAd63678eEDcC5A75462B66D062189Bb", deployer: DEPLOYER_ADDR },
   bsc:  { safe: "0x2a0ab363E01b518B189218e39f79Bfc3AE310807", deployer: DEPLOYER_ADDR },
 };

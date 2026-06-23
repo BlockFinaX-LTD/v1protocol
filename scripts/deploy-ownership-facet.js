@@ -1,4 +1,4 @@
-const { ethers } = require("hardhat");
+const { ethers, network } = require("hardhat");
 const fs = require("fs");
 
 async function main() {
@@ -15,11 +15,12 @@ async function main() {
   console.log("OwnershipFacet deployed at:", addr);
 
   fs.mkdirSync("deployments", { recursive: true });
+  const outFile = `deployments/deployments-ownership-facet-${network.name}.json`;
   fs.writeFileSync(
-    "deployments/deployments-ownership-facet-liskMainnet.json",
+    outFile,
     JSON.stringify({ ownershipFacet: addr, deployedAt: new Date().toISOString() }, null, 2)
   );
-  console.log("Saved to deployments/deployments-ownership-facet-liskMainnet.json");
+  console.log("Saved to", outFile);
 }
 
 main().catch(e => { console.error(e.message); process.exit(1); });
