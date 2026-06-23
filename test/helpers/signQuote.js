@@ -27,9 +27,18 @@ const crypto = require("node:crypto");
  * @returns {Promise<object>} params with signature, quoteTimestamp, quoteNonce populated.
  */
 async function signEventParams(signerWallet, params, ctx, overrides = {}) {
-  const quoteTimestamp = overrides.quoteTimestamp !== undefined
-    ? BigInt(overrides.quoteTimestamp)
-    : BigInt(Math.floor(Date.now() / 1000));
+  // Default the quote timestamp to the chain's CURRENT block time, not the wall clock.
+  // Hardhat's loadFixture snapshots/reverts block time between tests, so Date.now() can
+  // drift ahead of block.timestamp (especially under solidity-coverage's slower execution),
+  // tripping the "Quote timestamp in future" / "Quote expired" guards non-deterministically.
+  // Reading the latest block keeps the signature fresh relative to the EVM clock.
+  let quoteTimestamp;
+  if (overrides.quoteTimestamp !== undefined) {
+    quoteTimestamp = BigInt(overrides.quoteTimestamp);
+  } else {
+    const latest = await ethers.provider.getBlock("latest");
+    quoteTimestamp = BigInt(latest.timestamp);
+  }
   const quoteNonce = overrides.quoteNonce ?? ("0x" + crypto.randomBytes(32).toString("hex"));
 
   // Mirror exactly what HedgeFacet._verifyQuoteSignature recovers against:

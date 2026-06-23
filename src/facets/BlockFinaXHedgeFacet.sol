@@ -1428,15 +1428,21 @@ contract BlockFinaXHedgeFacet {
             "Cannot settle: no hedger positions and event has not expired"
         );
 
-        // M-1 fix: enforce settlement timing. The oracle may only settle before expiry if
-        // the submitted price already touches the strike (the event has economically resolved).
-        // After expiry, settlement is always allowed regardless of whether strike was hit.
+        // European-style settlement: an event may ONLY be settled at or after its expiry
+        // date — even if the strike has already been touched. This guarantees that payouts
+        // are never released early. The strike/trigger condition is evaluated using the
+        // settlement price posted at (or after) expiry.
+        //
+        // NOTE: this replaces the previous "settle early once the strike is touched" rule
+        // (the old M-1 guard). A strike that is touched mid-period but has retraced past the
+        // strike by expiry will NOT pay out, because `triggered` is judged from the price
+        // submitted at settlement time (i.e. at/after expiry).
         bool alreadyTriggered = evt.strikeAbove
             ? _settlementPrice >= evt.strike
             : _settlementPrice <= evt.strike;
         require(
-            block.timestamp >= evt.expiryDate || alreadyTriggered,
-            "Too early: event not expired and strike not yet reached"
+            block.timestamp >= evt.expiryDate,
+            "Too early: settlement only allowed at or after expiry"
         );
 
         // L-3 fix: reject settlement prices that are wildly implausible to catch

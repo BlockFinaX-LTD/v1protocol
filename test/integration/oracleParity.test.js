@@ -20,6 +20,7 @@ const {
   deployDiamondFixture,
   buildEventParams,
   openPool,
+  warpPastExpiry,
   rate,
   ONE_USDC,
 } = require("../helpers/fixtures");
@@ -58,6 +59,10 @@ describe("Oracle parity — single-key vs multi-oracle settlement", function () 
     await hedge.connect(signers.hedger2).buyProtection(eventA, 2_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
     await hedge.connect(signers.hedger1).buyProtection(eventB, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
     await hedge.connect(signers.hedger2).buyProtection(eventB, 2_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
+
+    // European settlement: both events can only settle at/after expiry. Both were created
+    // with the same default expiry, so one warp covers both.
+    await warpPastExpiry(hedge, eventB);
 
     // Settle A via single-key admin.
     await hedge.connect(signers.oracleAdmin).settleEvent(eventA, rate(11.5));
@@ -126,6 +131,7 @@ describe("Oracle parity — single-key vs multi-oracle settlement", function () 
     await hedge.connect(signers.hedger1).buyProtection(eventA, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
     await hedge.connect(signers.hedger1).buyProtection(eventB, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
 
+    await warpPastExpiry(hedge, eventB);
     await hedge.connect(signers.oracleAdmin).settleEvent(eventA, rate(11.5));
     await oracle.connect(signers.oracleA).submitRate(eventB, rate(11.5));
     await oracle.connect(signers.oracleB).submitRate(eventB, rate(11.5));
@@ -145,6 +151,7 @@ describe("Oracle consensus mechanics", function () {
 
     const eventId = await makeOpenEvent(hedge, signers);
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
+    await warpPastExpiry(hedge, eventId);
     await oracle.connect(signers.oracleA).submitRate(eventId, rate(11.5));
 
     const core = await hedge.getHedgeEventCore(eventId);
@@ -160,6 +167,7 @@ describe("Oracle consensus mechanics", function () {
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
 
     // 11.0 vs 11.5 = ~4.5% spread → way over tolerance → clear, no settlement.
+    await warpPastExpiry(hedge, eventId);
     await oracle.connect(signers.oracleA).submitRate(eventId, rate(11));
     await oracle.connect(signers.oracleB).submitRate(eventId, rate(11.5));
 
@@ -175,6 +183,7 @@ describe("Oracle consensus mechanics", function () {
     const eventId = await makeOpenEvent(hedge, signers);
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
 
+    await warpPastExpiry(hedge, eventId);
     await oracle.connect(signers.oracleA).submitRate(eventId, rate(11.2));
     // Same oracle tries to overwrite immediately.
     await expect(oracle.connect(signers.oracleA).submitRate(eventId, rate(11.3)))
@@ -195,6 +204,7 @@ describe("Oracle consensus mechanics", function () {
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
 
     // 1 of 3 submits, then stalls.
+    await warpPastExpiry(hedge, eventId);
     await oracle.connect(signers.oracleA).submitRate(eventId, rate(11.5));
     expect(await oracle.getSubmitterCount(eventId)).to.equal(1n);
 

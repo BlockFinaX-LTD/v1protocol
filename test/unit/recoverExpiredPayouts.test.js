@@ -33,6 +33,7 @@ const {
   deployDiamondFixture,
   buildEventParams,
   openPool,
+  warpPastExpiry,
   rate,
   ONE_USDC,
 } = require("../helpers/fixtures");
@@ -50,7 +51,8 @@ async function setupTriggeredEvent(hedge, signers, hedgers = [{ signer: null, no
   for (const h of hedgers) {
     await hedge.connect(h.signer).buyProtection(eventId, h.notional, MAX_UINT, FAR_FUTURE);
   }
-  // Trigger by settling above strike (range mid).
+  // Trigger by settling above strike (range mid). European: only possible at/after expiry.
+  await warpPastExpiry(hedge, eventId);
   await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(11.5));
   return eventId;
 }

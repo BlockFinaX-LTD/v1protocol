@@ -1,5 +1,5 @@
 /**
- * settleEvent.test.js — the v7 settlement math.
+ * settleEvent.test.js — the v7 settlement math + European (expiry-only) settlement timing.
  *
  * Covers:
  *   Range mode (payoutCap > 0):
@@ -19,16 +19,20 @@
  *     - only oracle admin or owner can call (pre-V2)
  *     - settlement price out of plausible range rejected
  *     - cannot settle Open events twice
- *     - cannot settle pre-expiry unless strike already touched
+ *
+ *   European settlement timing (post expiry-gating change):
+ *     - cannot settle BEFORE expiry, even when the strike has already been touched
+ *     - settlement only becomes possible at/after expiry; trigger judged on the expiry price
  */
 
 const { expect } = require("chai");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-network-helpers");
+const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 const { ethers } = require("hardhat");
 const {
   deployDiamondFixture,
   buildEventParams,
   openPool,
+  warpPastExpiry,
   rate,
   ONE_USDC,
 } = require("../helpers/fixtures");
@@ -56,10 +60,7 @@ describe("HedgeFacet.settleEvent — range mode payout math", function () {
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
     await hedge.connect(signers.hedger2).buyProtection(eventId, 2_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
 
-    // Time-travel past expiry so we can settle without "strike must be reached".
-    const core = await hedge.getHedgeEventCore(eventId);
-    await time.increaseTo(Number(core.expiryDate) + 1);
-
+    await warpPastExpiry(hedge, eventId);
     await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(10.5));
 
     const stats = await hedge.getHedgeEventStats(eventId);
@@ -81,6 +82,7 @@ describe("HedgeFacet.settleEvent — range mode payout math", function () {
     await hedge.connect(signers.hedger2).buyProtection(eventId, 2_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
 
     // Settlement at 11.5 → effectiveMove = 0.5, per-notional payout = 0.05
+    await warpPastExpiry(hedge, eventId);
     await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(11.5));
 
     const stats = await hedge.getHedgeEventStats(eventId);
@@ -108,6 +110,7 @@ describe("HedgeFacet.settleEvent — range mode payout math", function () {
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
 
     // Settlement at 13 → above cap (12). effectiveRate = 12, move = 1, payout = 100% of width.
+    await warpPastExpiry(hedge, eventId);
     await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(13));
 
     const positionIds = await hedge.getEventPositionIds(eventId);
@@ -123,6 +126,7 @@ describe("HedgeFacet.settleEvent — range mode payout math", function () {
     const eventId = await setupRangeEvent(hedge, signers);
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
     // initialRate=10, max plausible = 100x = 1000
+    await warpPastExpiry(hedge, eventId);
     await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(100));
     const positionIds = await hedge.getEventPositionIds(eventId);
     const pos = await hedge.getHedgePosition(positionIds[0]);
@@ -134,6 +138,7 @@ describe("HedgeFacet.settleEvent — range mode payout math", function () {
     const eventId = await setupRangeEvent(hedge, signers);
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
 
+    await warpPastExpiry(hedge, eventId);
     await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(11));
 
     const stats = await hedge.getHedgeEventStats(eventId);
@@ -157,8 +162,7 @@ describe("HedgeFacet.settleEvent — downward range mode symmetry", function () 
       strikeAbove: false, strike: rate(9), payoutCap: rate(8),
     });
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
-    const core = await hedge.getHedgeEventCore(eventId);
-    await time.increaseTo(Number(core.expiryDate) + 1);
+    await warpPastExpiry(hedge, eventId);
     await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(9.5));
     const positionIds = await hedge.getEventPositionIds(eventId);
     const pos = await hedge.getHedgePosition(positionIds[0]);
@@ -173,6 +177,7 @@ describe("HedgeFacet.settleEvent — downward range mode symmetry", function () 
     });
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
     // settlement at 8.5 → effectiveMove = 9 - 8.5 = 0.5; payout = 1000 × 0.5/10 = $50
+    await warpPastExpiry(hedge, eventId);
     await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(8.5));
     const positionIds = await hedge.getEventPositionIds(eventId);
     const pos = await hedge.getHedgePosition(positionIds[0]);
@@ -185,6 +190,7 @@ describe("HedgeFacet.settleEvent — downward range mode symmetry", function () 
       strikeAbove: false, strike: rate(9), payoutCap: rate(8),
     });
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
+    await warpPastExpiry(hedge, eventId);
     await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(7));
     const positionIds = await hedge.getEventPositionIds(eventId);
     const pos = await hedge.getHedgePosition(positionIds[0]);
@@ -199,6 +205,7 @@ describe("HedgeFacet.settleEvent — single-strike (legacy) mode", function () {
     // strike=11, initialRate=10 → priceDelta=1, per-notional payout = 0.1
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
     // settlement at 11.5 (above strike) → digital pays full $100, regardless of how far
+    await warpPastExpiry(hedge, eventId);
     await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(11.5));
 
     const positionIds = await hedge.getEventPositionIds(eventId);
@@ -215,6 +222,7 @@ describe("HedgeFacet.settleEvent — single-strike (legacy) mode", function () {
     const eventId = await setupRangeEvent(hedge, signers, { payoutCap: 0n });
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
     // Settlement at 50 (5x strike) — digital still pays the same fixed amount.
+    await warpPastExpiry(hedge, eventId);
     await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(50));
     const positionIds = await hedge.getEventPositionIds(eventId);
     const pos = await hedge.getHedgePosition(positionIds[0]);
@@ -225,8 +233,7 @@ describe("HedgeFacet.settleEvent — single-strike (legacy) mode", function () {
     const { hedge, signers } = await loadFixture(deployDiamondFixture);
     const eventId = await setupRangeEvent(hedge, signers, { payoutCap: 0n });
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
-    const core = await hedge.getHedgeEventCore(eventId);
-    await time.increaseTo(Number(core.expiryDate) + 1);
+    await warpPastExpiry(hedge, eventId);
     await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(10.5));
     const positionIds = await hedge.getEventPositionIds(eventId);
     const pos = await hedge.getHedgePosition(positionIds[0]);
@@ -243,6 +250,8 @@ describe("HedgeFacet.settleEvent — authority and sanity guards", function () {
     const eventId = await setupRangeEvent(hedge, signers);
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
 
+    await warpPastExpiry(hedge, eventId);
+    // Authority check runs in the onlyOracleAdmin modifier, before the expiry guard.
     await expect(hedge.connect(signers.stranger).settleEvent(eventId, rate(11.5)))
       .to.be.revertedWith("Not oracle admin");
     // Owner also works.
@@ -253,7 +262,8 @@ describe("HedgeFacet.settleEvent — authority and sanity guards", function () {
     const { hedge, signers } = await loadFixture(deployDiamondFixture);
     const eventId = await setupRangeEvent(hedge, signers);
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
-    // initialRate = 10. Plausible range is [0.1, 1000]. Try 1001:
+    // initialRate = 10. Plausible range is [0.1, 1000]. Try 1001 (past expiry so we reach the check):
+    await warpPastExpiry(hedge, eventId);
     await expect(hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(1001)))
       .to.be.revertedWith("Settlement price out of plausible range (must be within 100x of initial rate)");
   });
@@ -262,26 +272,10 @@ describe("HedgeFacet.settleEvent — authority and sanity guards", function () {
     const { hedge, signers } = await loadFixture(deployDiamondFixture);
     const eventId = await setupRangeEvent(hedge, signers);
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
+    await warpPastExpiry(hedge, eventId);
     await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(11.5));
     await expect(hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(12)))
       .to.be.revertedWith("Already settled");
-  });
-
-  it("rejects pre-expiry settlement when strike not yet touched", async function () {
-    const { hedge, signers } = await loadFixture(deployDiamondFixture);
-    const eventId = await setupRangeEvent(hedge, signers);
-    await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
-    // Below strike, before expiry.
-    await expect(hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(10.5)))
-      .to.be.revertedWith("Too early: event not expired and strike not yet reached");
-  });
-
-  it("allows pre-expiry settlement when strike has been touched", async function () {
-    const { hedge, signers } = await loadFixture(deployDiamondFixture);
-    const eventId = await setupRangeEvent(hedge, signers);
-    await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
-    // Pre-expiry but strike (11) was reached → allowed.
-    await expect(hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(11.2))).to.not.be.reverted;
   });
 
   it("snapshots totalLiquidity into liquidityAtSettlement", async function () {
@@ -289,12 +283,70 @@ describe("HedgeFacet.settleEvent — authority and sanity guards", function () {
     const eventId = await setupRangeEvent(hedge, signers);
     await hedge.connect(signers.lp1).deposit(eventId, 5_000n * ONE_USDC); // pool now $15K
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
+    await warpPastExpiry(hedge, eventId);
     await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(11.5));
     // The struct field isn't directly exposed by the existing getter; verify via withdrawCapital
     // behaviour by checking the recorded liquidity matches via a downstream test in the E2E suite.
     // For this unit test, we just confirm settlement ran and totalMaxPayout updated correctly.
     const stats = await hedge.getHedgeEventStats(eventId);
     expect(stats.totalMaxPayout).to.equal(50n * ONE_USDC);
+  });
+});
+
+describe("HedgeFacet.settleEvent — European (expiry-only) settlement timing", function () {
+  it("rejects settlement BEFORE expiry when strike has NOT been touched", async function () {
+    const { hedge, signers } = await loadFixture(deployDiamondFixture);
+    const eventId = await setupRangeEvent(hedge, signers);
+    await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
+    // Below strike, before expiry → rejected.
+    await expect(hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(10.5)))
+      .to.be.revertedWith("Too early: settlement only allowed at or after expiry");
+  });
+
+  it("rejects settlement BEFORE expiry even when the strike HAS been touched", async function () {
+    const { hedge, signers } = await loadFixture(deployDiamondFixture);
+    const eventId = await setupRangeEvent(hedge, signers);
+    await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
+    // Strike (11) reached, but still pre-expiry → STILL rejected under European semantics.
+    // This is the core behaviour of the expiry-gating change: no early payout.
+    await expect(hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(11.2)))
+      .to.be.revertedWith("Too early: settlement only allowed at or after expiry");
+  });
+
+  it("allows settlement at/after expiry and judges the trigger on the expiry price", async function () {
+    const { hedge, signers } = await loadFixture(deployDiamondFixture);
+    const eventId = await setupRangeEvent(hedge, signers);
+    await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
+
+    // Still rejected just before expiry...
+    await expect(hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(11.5)))
+      .to.be.revertedWith("Too early: settlement only allowed at or after expiry");
+
+    // ...then allowed at/after expiry.
+    await warpPastExpiry(hedge, eventId);
+    await expect(hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(11.5))).to.not.be.reverted;
+
+    const stats = await hedge.getHedgeEventStats(eventId);
+    expect(stats.triggered).to.equal(true);
+    expect(stats.settlementPrice).to.equal(rate(11.5));
+  });
+
+  it("a strike touched mid-period but retraced by expiry does NOT pay out (European)", async function () {
+    const { hedge, signers } = await loadFixture(deployDiamondFixture);
+    const eventId = await setupRangeEvent(hedge, signers);
+    await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
+
+    // The rate touched 11.2 mid-period (we cannot settle then), and by expiry it has retraced
+    // back below the strike to 10.5. The oracle settles on the expiry price → not triggered.
+    await warpPastExpiry(hedge, eventId);
+    await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(10.5));
+
+    const stats = await hedge.getHedgeEventStats(eventId);
+    expect(stats.triggered).to.equal(false);
+    const positionIds = await hedge.getEventPositionIds(eventId);
+    const pos = await hedge.getHedgePosition(positionIds[0]);
+    expect(pos.payoutAmount).to.equal(0n);
+    expect(pos.status).to.equal(PositionStatus.Expired);
   });
 });
 

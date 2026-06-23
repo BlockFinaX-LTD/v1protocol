@@ -301,6 +301,15 @@ contract BlockFinaXOracleFacet {
         );
         require(_price > 0, "Invalid price");
 
+        // European-style settlement: oracles may only submit (and therefore settle) at or
+        // after the event's expiry date. A strike touched before expiry does NOT settle the
+        // event early — this mirrors the same guard in HedgeFacet.settleEvent() so both
+        // settlement paths defer payout until expiry.
+        require(
+            block.timestamp >= evt.expiryDate,
+            "Too early: settlement only allowed at or after expiry"
+        );
+
         // Resubmission cooldown: applies to ALL submissions, including those in a new round
         // after a previous round was cleared. This prevents a malicious oracle from rapidly
         // cycling through submission rounds (submit → clear-by-disagreement → resubmit → repeat)

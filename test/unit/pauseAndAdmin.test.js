@@ -20,6 +20,7 @@ const {
   deployDiamondFixture,
   buildEventParams,
   openPool,
+  warpPastExpiry,
   rate,
   ONE_USDC,
 } = require("../helpers/fixtures");
@@ -71,6 +72,7 @@ describe("HedgeFacet — pause / unpause", function () {
     await openPool(hedge, signers.creator, eventId);
     await hedge.connect(signers.lp1).deposit(eventId, 5_000n * ONE_USDC);
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
+    await warpPastExpiry(hedge, eventId);
     await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(11.5));
 
     // Pause the protocol now.
@@ -98,6 +100,7 @@ describe("HedgeFacet — pause / unpause", function () {
     const eventId = await hedge.getTotalHedgeEvents();
     await openPool(hedge, signers.creator, eventId);
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
+    await warpPastExpiry(hedge, eventId);
 
     await hedge.connect(signers.owner).pause();
 
@@ -172,6 +175,7 @@ describe("HedgeFacet — oracle admin & V2 activation", function () {
     const eventId = await hedge.getTotalHedgeEvents();
     await openPool(hedge, signers.creator, eventId);
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
+    await warpPastExpiry(hedge, eventId);
 
     // The previously-set oracleAdmin signer is now stale.
     await expect(hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(11.5)))

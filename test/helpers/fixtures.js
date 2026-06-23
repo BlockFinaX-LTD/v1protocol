@@ -13,6 +13,7 @@
 
 const hre = require("hardhat");
 const { ethers } = hre;
+const { time } = require("@nomicfoundation/hardhat-network-helpers");
 
 // --- Constants mirroring the contract's own ----------------------------------
 const PRECISION = 10n ** 6n;          // 1e6 — fee/percentage denominator
@@ -210,6 +211,22 @@ async function openPool(hedge, creator, eventId, allowExternalLp = true) {
 }
 
 /**
+ * Warp the chain forward to just past an event's expiry.
+ *
+ * Settlement is European-style: an event can only be settled at or after its expiry
+ * date (see HedgeFacet.settleEvent and OracleFacet.submitRate). Tests that want to
+ * settle must call this first, otherwise settlement reverts with
+ * "Too early: settlement only allowed at or after expiry".
+ *
+ * @param {Contract} hedge   HedgeFacet bound to the Diamond.
+ * @param {bigint|number} eventId  The event whose expiry to jump past.
+ */
+async function warpPastExpiry(hedge, eventId) {
+  const core = await hedge.getHedgeEventCore(eventId);
+  await time.increaseTo(Number(core.expiryDate) + 1);
+}
+
+/**
  * Generate a random pricing-engine signer wallet AND register it on the Diamond.
  * Returns the wallet so tests can use it to sign quotes.
  *
@@ -226,6 +243,7 @@ module.exports = {
   deployDiamondFixture,
   buildEventParams,
   openPool,
+  warpPastExpiry,
   setupPricingEngineSigner,
   getSelectors,
   PRECISION,
