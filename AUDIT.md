@@ -39,6 +39,8 @@ and direct read-only on-chain verification via RPC.
 | [F-06](#f-06) | **High** | Frontend/API calls `recoverExpiredPayouts(eventId)` for LP capital recovery | Integration |
 | [F-07](#f-07) | **Low** | No per-hedger concentration cap on pool capacity | Design |
 | [F-08](#f-08) | **Info** | Orphaned facet addresses remain in `facetAddresses()` after upgrades | Cosmetic |
+| [F-09](#f-09) | **Medium** | Production event creation fee is **$2**, intended **$25** (config drift) | Configuration |
+| [F-10](#f-10) | **Planned** | Hedger platform fee must be rebased: **0.5% of notional → 2.5% of premium** (requires code change) | Contract / Economics |
 
 ---
 
@@ -258,6 +260,92 @@ was verified post-upgrade. `scripts/remove-orphans-v8.js` cleans this up.
 
 ---
 
+### <a id="f-09"></a>F-09 — Production event creation fee is $2, not the intended $25 (Medium)
+
+**Observed on-chain.** `getHedgeFeeConfig()` returns `eventCreationFee`:
+
+| Chain | Live value | Human | Intended |
+|---|---|---|---|
+| Base (USDC, 6 dec) | `2000000` | **$2** | **$25** → `25000000` |
+| BSC (USDT, 18 dec) | `2000000000000000000` | **$2** | **$25** → `25000000000000000000` |
+
+The Base deployment record (`deployments-diamond-base.json`) documents `25000000` ($25), but
+`scripts/set-fee-new-diamonds.js` later set it to $2 on both chains. Production has drifted from
+the intended fee schedule and is under-charging event creation by 12.5×.
+
+**Impact.** Revenue loss only; no security consequence. Also weakens the creation fee's role as a
+spam deterrent for event creation.
+
+**Recommendation.** Restore $25 via `initializeHedgeFees(...)` (owner-only). This is a **pure
+configuration change — no contract upgrade needed.** Mind the decimals per chain (USDC 6-dec vs
+USDT 18-dec) and note the `$1000` cap in `initializeHedgeFees`. Existing events are unaffected:
+fee rates are snapshotted per-event at `createEvent`, so changes apply only to **new** events.
+
+---
+
+### <a id="f-10"></a>F-10 — Hedger platform fee must be rebased from notional to premium (Planned change)
+
+**Current behaviour.** `buyProtection` charges the platform fee as a fraction of **notional**:
+
+```solidity
+uint256 premium     = (_notional * evt.premiumRate) / PRECISION;
+uint256 platformFee = (_notional * hedgerFeeRate)  / PRECISION;   // ← based on NOTIONAL
+uint256 totalCost   = premium + platformFee;
+```
+
+**Intended behaviour.** Charge **2.5% of the premium**, not of notional:
+
+```solidity
+uint256 platformFee = (premium * hedgerFeeRate) / PRECISION;      // ← based on PREMIUM
+// with hedgerFeeRate = 25_000  (2.5%)
+```
+
+Worked example (the target semantics): `notional = 100,000`, `premiumRate = 1%` → `premium = 1,000`.
+The hedger pays `1,000 + 2.5% × 1,000 = 1,025`.
+
+> ⚠️ **This is a code change, not a config change.** Setting `hedgerFeeRate = 25_000` alone would
+> charge **2.5% of notional** (= 2,500 on the example above — worse than today). The fee *base* is
+> hard-coded to `_notional` and must be changed to `premium` in `buyProtection`, then shipped as a
+> facet upgrade.
+
+**Why the change is directionally right.** Under the current formula the fee as a share of premium is
+`hedgerFeeRate / premiumRate`. At today's production values (0.5% / 1%) the platform takes **50% of
+the premium** — the hedger pays a 50% surcharge on top of their premium. Rebasing to 2.5% of premium
+reduces that surcharge to 2.5%, which is far more defensible.
+
+**Revenue impact — quantify before shipping.** New fee ÷ old fee = `5 × premiumRate`:
+
+| `premiumRate` | Old fee (0.5% × notional) | New fee (2.5% × premium) | Change |
+|---|---|---|---|
+| 1% | 500 | 25 | **−95%** |
+| 2.5% | 500 | 62.50 | −87.5% |
+| 20% | 500 | 500 | break-even |
+
+At a 1% premium rate this cuts hedger-fee revenue by ~95×/20×. Creator-loyalty earnings (5% of every
+platform fee) scale down proportionally. This may well be intentional — but it should be a decision,
+not a surprise.
+
+**Deployment caveat (same class as the European settlement change).** `HedgeEvent` snapshots
+`snapshotHedgerFeeRate` as a *rate*, not a formula. Changing the formula therefore **retroactively
+reinterprets the snapshot** of any event that is still `Open` — their fee base would silently switch
+from notional to premium mid-flight. Ship this only when there are **zero open events** (currently
+true on both chains: 0 open), or gate the new formula behind a per-event flag.
+
+**Work required.**
+1. `BlockFinaXHedgeFacet.buyProtection` — change the fee base to `premium`.
+2. Update NatSpec on `HedgeFeeConfig.hedgerFeeRate` ("Platform fee on notional" → "on premium") and
+   the facet header comment describing the cost breakdown.
+3. Set `hedgerFeeRate = 25_000` (2.5%) via `initializeHedgeFees`. The ≤10% cap already permits this.
+4. Update tests that assert the old basis (`buyProtection.test.js` expects `platformFeePaid` =
+   0.5% × notional; `bakerScenario`, `multiToken`, `feeAdminAndViews` encode the $5 / $29.75 figures).
+5. Deploy via `npm run upgrade:hedge:base` / `:bsc` while no events are open, then verify
+   `getHedgeFeeConfig()` on both chains.
+
+Note `lpProfitFeeRate` is **already** premium-based (charged on the premium claim), so this change
+makes the fee model internally consistent.
+
+---
+
 ## 4. Verified correct (no action required)
 
 These were examined closely and found sound:
@@ -294,7 +382,14 @@ These were examined closely and found sound:
    long-dated LP recovery fallback. Removes the stranded-capital risk introduced by European settlement.
 5. **F-04** — split the oracle key from the owner key; move toward `activateOracleV2()` consensus.
 6. **F-05** — render `Open && now > expiryDate` as **"Awaiting settlement"** in all consumers.
-7. **F-07 / F-08** — optional hardening and cleanup.
+7. **F-09** — restore the $25 event creation fee on both chains *(config only, no upgrade)*.
+8. **F-10** — rebase the hedger fee to 2.5% of premium *(code change; ship while 0 events are open,
+   ideally batched with the F-02/F-03 contract fixes into a single facet upgrade)*.
+9. **F-07 / F-08** — optional hardening and cleanup.
+
+> **Batching note.** F-02 (access control), F-03 (`expireEvent`), and F-10 (fee rebase) are all
+> `HedgeFacet` changes. Ship them as **one** facet upgrade rather than three, and do it while no
+> events are open so no in-flight event's snapshot semantics change.
 
 ---
 
