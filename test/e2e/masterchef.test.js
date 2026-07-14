@@ -179,8 +179,8 @@ describe("E2E: MasterChef premium accumulator — late-joiner fairness", functio
       .to.be.revertedWith("No premiums to claim");
   });
 
-  it("withdrawn LP cannot claim further premiums (H-01 fix)", async function () {
-    const { hedge, signers } = await loadFixture(deployDiamondFixture);
+  it("F-11: an LP can claim premiums AFTER withdrawing capital (recovery), without double-claiming", async function () {
+    const { hedge, signers, usdc } = await loadFixture(deployDiamondFixture);
 
     await hedge.connect(signers.creator).createEvent(buildEventParams({
       initialLiquidity: 10_000n * ONE_USDC,
@@ -197,12 +197,24 @@ describe("E2E: MasterChef premium accumulator — late-joiner fairness", functio
     await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(10.5));
 
     const lp1DepId = (await hedge.getLpDepositIds(signers.lp1.address))[0];
-    // First claim premiums OK.
-    await hedge.connect(signers.lp1).claimPremiums(lp1DepId);
-    // Then withdraw capital.
+
+    // LP withdraws capital FIRST, without claiming premiums (the exact trap that stranded
+    // funds on mainnet). Their premium is still owed and still visible.
+    const pendingBeforeWithdraw = await hedge.pendingPremiums(lp1DepId);
+    expect(pendingBeforeWithdraw).to.be.gt(0n);
     await hedge.connect(signers.lp1).withdrawCapital(lp1DepId);
-    // Any further claim must revert per H-01.
+    // pendingPremiums still reports the recoverable amount after withdrawal.
+    expect(await hedge.pendingPremiums(lp1DepId)).to.equal(pendingBeforeWithdraw);
+
+    // Now the LP recovers their premiums by calling claimPremiums AFTER withdrawal.
+    const balBefore = await usdc.balanceOf(signers.lp1.address);
     await expect(hedge.connect(signers.lp1).claimPremiums(lp1DepId))
-      .to.be.revertedWith("Capital already withdrawn: cannot claim premiums");
+      .to.emit(hedge, "PremiumsClaimed");
+    expect(await usdc.balanceOf(signers.lp1.address)).to.be.gt(balBefore);
+
+    // Cannot double-claim: rewardDebt has advanced, so a second claim finds nothing.
+    expect(await hedge.pendingPremiums(lp1DepId)).to.equal(0n);
+    await expect(hedge.connect(signers.lp1).claimPremiums(lp1DepId))
+      .to.be.revertedWith("No premiums to claim");
   });
 });

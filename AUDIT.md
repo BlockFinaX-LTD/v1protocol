@@ -29,10 +29,17 @@ and direct read-only on-chain verification via RPC.
 
 ## 2. Findings summary
 
+> **Remediation status (updated).** F-02 and F-11 were fixed and deployed to **Base**
+> on the HedgeFacet upgrade cut `0x29251f78ef441a4df70c2cb7db69f256418f68953ba0d5a8ab0fcf44349cc62d`
+> (new HedgeFacet `0x62be10C0642e9CF06656C113941a3D0180fC9850`). Verified on chain: the 19.2725
+> USDC of stranded premiums is now claimable by the affected LPs, and `recoverExpiredPayouts`
+> reverts "Not owner" for non-owners. **BSC is still pending** — the deployer wallet is out of
+> BNB gas; upgrade BSC after topping up. All other findings remain open.
+
 | ID | Severity | Title | Layer |
 |---|---|---|---|
 | [F-01](#f-01) | **Critical** | Single EOA controls upgrades; no timelock, no multisig | Governance |
-| [F-02](#f-02) | **High** | `recoverExpiredPayouts` is permissionless and can destroy unclaimed hedger payouts | Contract |
+| [F-02](#f-02) | **High (FIXED on Base)** | `recoverExpiredPayouts` was permissionless and could destroy unclaimed hedger payouts | Contract |
 | [F-03](#f-03) | **High** | LP capital can be stranded indefinitely if the oracle never settles | Contract / Liveness |
 | [F-04](#f-04) | **High** | Settlement price authority concentrated in one key (same key as owner) | Governance |
 | [F-05](#f-05) | **Medium** | `HedgeEventStatus.Expired` is never assigned → UI/chain state mismatch | Contract / Integration |
@@ -41,6 +48,7 @@ and direct read-only on-chain verification via RPC.
 | [F-08](#f-08) | **Info** | Orphaned facet addresses remain in `facetAddresses()` after upgrades | Cosmetic |
 | [F-09](#f-09) | **Medium** | Production event creation fee is **$2**, intended **$25** (config drift) | Configuration |
 | [F-10](#f-10) | **Planned** | Hedger platform fee must be rebased: **0.5% of notional → 2.5% of premium** (requires code change) | Contract / Economics |
+| [F-11](#f-11) | **High (FIXED on Base)** | LP premiums stranded permanently when capital is withdrawn before claiming (~19.27 USDC) | Contract |
 
 ---
 
@@ -98,6 +106,11 @@ elapsed. This becomes live as the protocol ages.
 
 **Recommendation.** Restrict to `onlyOwner` (or a dedicated keeper role). Consider also emitting
 a per-position event so confiscations are auditable, and/or lengthening the grace period.
+
+---
+
+**STATUS: FIXED on Base** (cut `0x29251f78…`). `recoverExpiredPayouts` is now `onlyOwner`.
+Verified: a non-owner call reverts "Not owner". BSC pending gas top-up.
 
 ---
 
@@ -343,6 +356,42 @@ true on both chains: 0 open), or gate the new formula behind a per-event flag.
 
 Note `lpProfitFeeRate` is **already** premium-based (charged on the premium claim), so this change
 makes the fee model internally consistent.
+
+---
+
+### <a id="f-11"></a>F-11 — LP premiums stranded on withdrawal-before-claim (High)
+
+**STATUS: FIXED on Base** (cut `0x29251f78…`, new HedgeFacet `0x62be10C0…fC9850`).
+
+**Observed on-chain.** The Base diamond held 52.30 USDC, of which ~19.27 was unattributable to
+any claimable bucket. Tracing contract state showed it was exactly the sum of premiums paid in by
+hedgers that no LP had ever claimed: total premiums paid in 19.4726, total ever claimed **0.0**,
+still-claimable on the one open event 0.2, leaving **19.2726 USDC stranded**.
+
+**Root cause.** The `H-01` guard in `claimPremiums` blocked *all* premium claims once an LP had
+withdrawn capital (`require(!dep.withdrawn)`). Because `withdrawCapital` does not auto-pay premiums,
+any LP who called `withdrawCapital` before `claimPremiums` permanently forfeited their premium
+income, and — since no existing function can move the payment token out except the capped fee
+withdrawal (which excludes it) and the USDC-blocked `rescueERC20` — the tokens became unrecoverable
+without a code change. Every LP across every settled event hit this (claimed = 0).
+
+Attribution: dep#1 (`0xCab3…e894`) 1.0; dep#3+#5 (`0x6084…2C83`) 9.6302; dep#6+#7 (`0x420e…1e98`)
+8.6423.
+
+**Why the guard was unnecessary.** `withdrawCapital` requires the event to be settled, and
+`buyProtection` (the only thing that grows `accPremiumPerShare`) requires it to be Open. So once a
+deposit is withdrawable its premium accumulator is permanently frozen; `rewardDebt` advances on each
+claim, so a withdrawn LP can claim their frozen premium exactly once. The "claim indefinitely"
+concern the guard was added for cannot occur.
+
+**Fix.** Removed the `!dep.withdrawn` guard from `claimPremiums` (premiums are now claimable before
+or after capital withdrawal) and updated `pendingPremiums` to report the recoverable amount for
+withdrawn deposits. Verified on chain: simulated `claimPremiums` from each affected LP now succeeds,
+totalling 19.2725 USDC recoverable.
+
+**Recommended follow-up.** Frontend should surface pending premiums for withdrawn deposits and
+prompt affected LPs to reclaim. Optionally, have `withdrawCapital` auto-pay pending premiums so it is
+a single action (deferred; not required for correctness now that claims are always possible).
 
 ---
 

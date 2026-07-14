@@ -494,13 +494,17 @@ contract BlockFinaXHedgeFacet {
      *      that funds are never permanently locked in the contract.
      *
      *      Safety guarantees:
+     *        - F-02 fix: restricted to the contract owner. Previously permissionless, which
+     *          meant any address (or a mis-wired frontend button) could confiscate a winning
+     *          hedger's still-unclaimed payout into platform fees. Recovery of stranded funds
+     *          is an administrative action and is now owner-only.
      *        - Requires the event to be Settled and at least 90 days past settlement.
      *        - Idempotent: sets totalMaxPayout = totalPayoutClaimed so a second call is a no-op.
      *        - Uses CEI: state updated before interaction.
      *
      * @param _eventId The settled event whose unclaimed payouts should be recovered.
      */
-    function recoverExpiredPayouts(uint256 _eventId) external nonReentrant {
+    function recoverExpiredPayouts(uint256 _eventId) external onlyOwner nonReentrant {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[_eventId];
 
@@ -1630,7 +1634,8 @@ contract BlockFinaXHedgeFacet {
      *      A platform fee (lpProfitFeeRate) is deducted from the claimable amount.
      *      A share of that fee (creatorLoyaltyRate) is credited to the event creator.
      *      Uses CEI: premiumsClaimed updated before the USDC transfer.
-     *      Can be called before or after event settlement.
+     *      Can be called before or after event settlement, and before OR AFTER the LP has
+     *      withdrawn their capital.
      *
      * @param _depositId The LP deposit to claim premiums for.
      */
@@ -1640,10 +1645,16 @@ contract BlockFinaXHedgeFacet {
 
         require(dep.id > 0, "Deposit not found");
         require(msg.sender == dep.lp, "Not your deposit");
-        // H-01 fix: block premium claims after capital has been withdrawn.
-        // dep.shares is not zeroed on withdrawal, so without this check an LP
-        // could claim premiums indefinitely after calling withdrawCapital().
-        require(!dep.withdrawn, "Capital already withdrawn: cannot claim premiums");
+        // F-11 fix: the previous H-01 guard blocked ALL premium claims once capital was
+        // withdrawn. That was over-broad: it permanently stranded premiums earned by LPs
+        // who withdrew capital before claiming (see AUDIT.md F-11). Claiming after withdrawal
+        // is safe because:
+        //   - withdrawCapital requires the event to be settled (evt.status != Open), and
+        //   - buyProtection (the only thing that grows accPremiumPerShare) requires Open.
+        // So once a deposit can be withdrawn, its accPremiumPerShare is permanently frozen and
+        // its claimable amount cannot grow. rewardDebt is advanced to `accured` on each claim,
+        // so a withdrawn LP can claim their frozen premium exactly once and no more. The
+        // original "claim indefinitely" concern therefore cannot occur.
 
         // Fix 4 (MasterChef): compute claimable using the accumulator rather than the
         // push-distributed premiumsEarned field.  rewardDebt records the value of
@@ -2205,7 +2216,9 @@ contract BlockFinaXHedgeFacet {
     function pendingPremiums(uint256 _depositId) external view returns (uint256 pending) {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.HedgeLpDeposit storage dep = s.hedgeLpDeposits[_depositId];
-        if (dep.id == 0 || dep.withdrawn) return 0;
+        // F-11: still report pending for withdrawn deposits — premiums remain claimable
+        // (via claimPremiums) after capital withdrawal, so frontends must be able to see them.
+        if (dep.id == 0) return 0;
         LibAppStorage.HedgeEvent storage evt = s.hedgeEvents[dep.eventId];
         uint256 accured = (dep.shares * evt.accPremiumPerShare) / ACC_PREMIUM_MULTIPLIER;
         pending = accured > dep.rewardDebt ? accured - dep.rewardDebt : 0;

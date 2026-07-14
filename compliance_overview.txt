@@ -1,0 +1,156 @@
+BLOCKFINAX PROTOCOL
+Operational and Infrastructure Overview
+Prepared for internal compliance orientation. All addresses verified on chain.
+
+
+1. WHAT BLOCKFINAX DOES
+
+BlockFinaX operates an on chain marketplace for hedging foreign exchange risk in emerging
+markets. Individuals and businesses exposed to a weakening local currency can buy parametric
+protection that pays out automatically based on an exchange rate reported by oracles. The
+counterparties who fund those payouts are liquidity providers, also called underwriters, who
+deposit stablecoin capital and earn premiums in return.
+
+The company does not take a market position. It operates the software and earns service fees
+on activity. Payouts are funded entirely by liquidity provider capital, not by the company.
+
+
+2. CUSTODY MODEL
+
+The protocol is non custodial. User funds are never held in a company bank account or a company
+controlled omnibus wallet. When a user deposits, buys protection, or receives a payout, the funds
+move directly into and out of audited smart contracts on public blockchains. The company cannot
+freeze, reassign, or spend user principal through the normal contract interface. The company can
+withdraw only the accrued service fees, and only up to the fee amount recorded by the contract.
+
+All value is denominated in regulated stablecoins. The contracts do not accept or hold native
+cryptocurrency such as ETH.
+
+
+3. NETWORKS AND SMART CONTRACTS
+
+The protocol is deployed on two public networks. Each network runs one upgradeable smart contract
+system built on the EIP 2535 Diamond standard. The main contract address is stable and never
+changes across software updates.
+
+Base network, chain id 8453
+  Main contract: 0xbCC51E62C4948FD35ab505bd71804C849601e4Ef
+  Payment asset: USDC at 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+
+BNB Smart Chain network, chain id 56
+  Main contract: 0xaC939C0897981Abc0711ec4e37527F13106180fc
+  Payment asset: USDT at 0x55d398326f99059fF775485246999027B3197955
+
+Test networks Base Sepolia and BSC testnet are used for development only and hold no real value.
+
+
+4. HOW A TRANSACTION FLOWS
+
+Step 1. A creator opens a hedge event for a currency pair, for example USD to Ghana Cedi, and
+        deposits initial liquidity.
+Step 2. Liquidity providers deposit stablecoins and receive proportional pool shares.
+Step 3. A hedger buys protection. They pay a premium, which is distributed to the liquidity
+        providers, plus a service fee. The maximum possible payout is reserved from pool capital
+        at this moment so the pool always holds enough to cover it.
+Step 4. At the scheduled expiry date, oracles report the settlement exchange rate.
+Step 5. If the protection triggered, the hedger claims a payout. Liquidity providers reclaim their
+        capital net of any amount paid out. Premiums can be claimed at any time.
+
+Settlement is European style. An event can only be settled at or after its expiry date. The
+outcome is decided by the rate at expiry.
+
+
+5. SERVICE FEES AND REVENUE
+
+The company earns four fee types plus a loyalty share. All are collected in the same stablecoin as
+the event.
+
+Event creation fee. A flat fee charged when a creator opens an event. Currently set to 2 USD,
+  scheduled to be raised to 25 USD.
+Hedger fee. A percentage charged when protection is bought. Currently 0.5 percent of notional. A
+  planned change will rebase this to 2.5 percent of the premium.
+Payout fee. 1 percent of a payout, deducted when a hedger claims.
+Liquidity provider fee. 1 percent of premium income, deducted when a provider claims premiums.
+Creator loyalty. 5 percent of every service fee is redirected to the event creator as an incentive.
+
+Fees accrue inside the contract and are withdrawn by the operator to a company wallet. As of this
+overview the accrued protocol revenue is small, consistent with an early stage pilot.
+
+
+6. INFRASTRUCTURE WALLETS AND THEIR ROLES
+
+Operator wallet. The primary administrative key. It owns the contracts, can deploy software
+  updates, can adjust fee settings, and currently also acts as the settlement submitter.
+  Address, both networks: 0xef5Bed7c221c85A2c88e3c0223ee45482d6F037d
+
+Oracle wallets. Independent wallets authorized to submit exchange rate readings for settlement.
+  Settlement by consensus requires agreement among these wallets within a tolerance band.
+  Address 1: 0x1F038152d5E6F120E26f8F11688cB9Dc27703236
+  Address 2: 0x488F6090Ede627cddf3f4f12E46FB5665EBBCcfA
+  Address 3: 0x4fA8B101ed6E80F06D3eB2910381ff2901a0cbD3
+
+Pricing engine signer. An off chain service key that cryptographically signs price quotes so the
+  contract can verify a premium was produced by the official pricing engine.
+  Address: 0x27F473004068792099d82EBD099e72b2aA1D6d88
+
+Governance multisignature wallets. Gnosis Safe wallets, each requiring 2 of 3 approvals, intended
+  to become the owner of the contracts so that software updates require multiple approvers. These
+  are deployed but not yet activated as owner. See section 8.
+  Base Safe: 0x7909a2f1fAd63678eEDcC5A75462B66D062189Bb
+  BSC Safe: 0x2a0ab363E01b518B189218e39f79Bfc3AE310807
+  Approver keys on both Safes:
+    0x331B1ce9250b53e807935F65D5cd04C2234af3a0
+    0xc69352C36562ce2D4C57B38baf47cE7D1eF6b891
+    0x6C0e8E46728953322C83cD2A0c3eDa122F077723
+
+
+7. OFF CHAIN SYSTEMS
+
+Pricing engine. Calculates fair premium quotes for each event and signs them with the pricing
+  engine signer key listed above. This keeps pricing consistent and verifiable on chain.
+
+Transaction service. A backend service that helps users submit transactions. It uses account
+  abstraction, an industry standard where a user operates through a smart contract wallet and a
+  third party paymaster can sponsor network fees. The paymaster contract observed in use is
+  0x777777777777AeC03fd955926DbF81597e66834C. Users retain control of their own funds and approvals.
+
+Application. The consumer facing website and backend live in a separate code repository. The on
+  chain contracts do not perform identity checks. Any user level onboarding, screening, or
+  eligibility controls are handled at the application layer, outside the smart contracts.
+
+
+8. GOVERNANCE AND KEY MANAGEMENT
+
+Current state. On both networks the contracts are owned by the single operator wallet listed in
+  section 6, and software updates apply immediately. That same wallet is also the current
+  settlement submitter. The 2 of 3 governance Safes are deployed but ownership has not yet been
+  transferred to them, and the time delay module is not yet installed.
+
+Planned hardening. The roadmap moves control to the 2 of 3 Safes and adds a 48 hour delay on any
+  software update, so that changes require multiple approvers and a public waiting period. Tooling
+  for this transition is prepared. Separating the settlement key from the ownership key is also
+  planned.
+
+
+9. SECURITY POSTURE
+
+The smart contract code has undergone an internal engineering review and an automated test suite
+with full function coverage on the production contracts. A formal independent third party audit
+has not yet been performed and is recommended before scaling total value locked.
+
+Core protections in the contracts include the following. Payouts are always fully collateralized
+by liquidity provider capital reserved at purchase time. Reentrancy protection and a checks then
+effects then interactions pattern guard all fund movements. Internal accounting tracks balances
+rather than trusting raw token balances, which prevents balance manipulation. The operator is
+blocked from sweeping the payment token, so user principal cannot be withdrawn through the rescue
+function.
+
+
+10. SUMMARY
+
+BlockFinaX runs non custodial foreign exchange hedging software on the Base and BNB Smart Chain
+networks, denominated in USDC and USDT. Users retain custody of their funds inside audited smart
+contracts. The company earns service fees on activity and does not take market risk. Administrative
+control currently rests with a single operator key, with a transition to multisignature governance
+and a settlement key separation planned. Off chain systems provide pricing, fee sponsored
+transaction submission, and the consumer application, none of which take custody of user principal.

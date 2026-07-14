@@ -142,14 +142,18 @@ describe("HedgeFacet.recoverExpiredPayouts — successful sweep", function () {
     expect(await usdc.balanceOf(signers.owner.address) - balBefore).to.equal(50n * ONE_USDC);
   });
 
-  it("anyone can call recoverExpiredPayouts (it's permissionless by design)", async function () {
+  it("F-02: only the owner can call recoverExpiredPayouts (not permissionless)", async function () {
     const { hedge, signers } = await loadFixture(deployDiamondFixture);
     const eventId = await setupTriggeredEvent(hedge, signers, [
       { signer: signers.hedger1, notional: 1_000n * ONE_USDC },
     ]);
     await time.increase(GRACE_PERIOD + 1);
-    // Stranger can call it — there's no onlyOwner guard.
+    // A stranger can no longer sweep unclaimed hedger payouts — this used to be permissionless
+    // and let anyone confiscate a winning hedger's payout into platform fees.
     await expect(hedge.connect(signers.stranger).recoverExpiredPayouts(eventId))
+      .to.be.revertedWith("Not owner");
+    // The owner still can.
+    await expect(hedge.connect(signers.owner).recoverExpiredPayouts(eventId))
       .to.not.be.reverted;
   });
 
