@@ -151,7 +151,7 @@ describe("E2E: MasterChef premium accumulator — late-joiner fairness", functio
     const pending = await hedge.pendingPremiums(creatorDepId);
     expect(pending).to.equal(12n * ONE_USDC + 500_000n); // half of $25 = $12.50
 
-    const lpFee = (pending * 10_000n) / 1_000_000n; // 1%
+    const lpFee = (pending * 20_000n) / 1_000_000n; // 2%
     const expectedNet = pending - lpFee;
 
     const balBefore = await usdc.balanceOf(signers.creator.address);

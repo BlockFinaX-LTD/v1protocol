@@ -20,13 +20,13 @@ const PRECISION = 10n ** 6n;          // 1e6 — fee/percentage denominator
 const USDC_DECIMALS = 6;              // payment token decimals
 const ONE_USDC = 10n ** BigInt(USDC_DECIMALS); // 1 USDC in raw units
 
-// Default fee config used in tests. Mirrors the Base mainnet default in deploy-diamond.js.
+// Default fee config used in tests. Mirrors the intended Base mainnet production schedule.
 const DEFAULT_FEES = {
   eventCreationFee:    25n * ONE_USDC, // $25
-  hedgerFeeRate:        5_000n,        // 0.5%
-  hedgerPayoutFeeRate: 10_000n,        // 1%
-  lpProfitFeeRate:     10_000n,        // 1%
-  creatorLoyaltyRate:  50_000n,        // 5%
+  hedgerFeeRate:       50_000n,        // 5% of the PREMIUM (base = premium, not notional)
+  hedgerPayoutFeeRate: 20_000n,        // 2% of gross payout
+  lpProfitFeeRate:     20_000n,        // 2% of premiums claimed
+  creatorLoyaltyRate:  50_000n,        // 5% of every platform fee
 };
 
 // Helper: convert a human dollar amount (number or bigint) into USDC raw units.

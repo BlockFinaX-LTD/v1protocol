@@ -1274,7 +1274,7 @@ contract BlockFinaXHedgeFacet {
      *
      *      Cost breakdown charged to the hedger:
      *        premium      = notional * premiumRate / PRECISION  (distributed to LPs immediately)
-     *        platform fee = notional * hedgerFeeRate / PRECISION (split: creatorLoyalty + platform)
+     *        platform fee = premium  * hedgerFeeRate / PRECISION (split: creatorLoyalty + platform)
      *        total cost   = premium + platform fee
      *
      *      Positions are capped at MAX_POSITIONS_PER_EVENT (500) to bound the gas cost
@@ -1339,7 +1339,9 @@ contract BlockFinaXHedgeFacet {
         (uint256 hedgerFeeRate, , , uint256 creatorLoyaltyRate) = _eventFees(evt, s);
 
         uint256 premium = (_notional * evt.premiumRate) / PRECISION;
-        uint256 platformFee = (_notional * hedgerFeeRate) / PRECISION;
+        // Platform fee is charged as a percentage of the PREMIUM (not the notional).
+        // e.g. hedgerFeeRate = 50_000 (5%) on a $1,000 premium => $50 fee, hedger pays $1,050.
+        uint256 platformFee = (premium * hedgerFeeRate) / PRECISION;
         uint256 totalCost = premium + platformFee;
 
         // M-3 fix: slippage guard — revert if actual cost exceeds caller's stated maximum.

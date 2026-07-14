@@ -33,8 +33,17 @@ and direct read-only on-chain verification via RPC.
 > on the HedgeFacet upgrade cut `0x29251f78ef441a4df70c2cb7db69f256418f68953ba0d5a8ab0fcf44349cc62d`
 > (new HedgeFacet `0x62be10C0642e9CF06656C113941a3D0180fC9850`). Verified on chain: the 19.2725
 > USDC of stranded premiums is now claimable by the affected LPs, and `recoverExpiredPayouts`
-> reverts "Not owner" for non-owners. **BSC is still pending** — the deployer wallet is out of
-> BNB gas; upgrade BSC after topping up. All other findings remain open.
+> reverts "Not owner" for non-owners.
+>
+> The fee-model changes (F-09, F-10) were also deployed to **Base** — facet upgrade cut
+> `0xae1e2611c7dbc45cc517b2154e33d64f5b43043da4189f3078e7de2d16c922e3` (new HedgeFacet
+> `0xAf7f51795b2583a2ce73186A19090B51FA0f52C1`) plus `initializeHedgeFees` tx
+> `0x8895dbd6810c1ee8602380b72f02ff73252af8b5f0feb1ecf73a40b8a7b85973`. Verified on chain:
+> getHedgeFeeConfig = [25000000, 50000, 20000, 20000, 50000] = $25 / 5% of premium / 2% payout /
+> 2% LP / 5% loyalty.
+>
+> **BSC is still pending on all of the above** — the deployer wallet is out of BNB gas; upgrade
+> BSC after topping up. All other findings remain open.
 
 | ID | Severity | Title | Layer |
 |---|---|---|---|
@@ -46,8 +55,8 @@ and direct read-only on-chain verification via RPC.
 | [F-06](#f-06) | **High** | Frontend/API calls `recoverExpiredPayouts(eventId)` for LP capital recovery | Integration |
 | [F-07](#f-07) | **Low** | No per-hedger concentration cap on pool capacity | Design |
 | [F-08](#f-08) | **Info** | Orphaned facet addresses remain in `facetAddresses()` after upgrades | Cosmetic |
-| [F-09](#f-09) | **Medium** | Production event creation fee is **$2**, intended **$25** (config drift) | Configuration |
-| [F-10](#f-10) | **Planned** | Hedger platform fee must be rebased: **0.5% of notional → 2.5% of premium** (requires code change) | Contract / Economics |
+| [F-09](#f-09) | **Medium (FIXED on Base)** | Event creation fee was **$2**, now **$25** | Configuration |
+| [F-10](#f-10) | **FIXED on Base** | Hedger platform fee rebased to **5% of premium** (was 0.5% of notional); payout & LP fees raised to 2% | Contract / Economics |
 | [F-11](#f-11) | **High (FIXED on Base)** | LP premiums stranded permanently when capital is withdrawn before claiming (~19.27 USDC) | Contract |
 
 ---

@@ -105,8 +105,8 @@ describe("HedgeFacet — protocol-state views", function () {
     const eventId = await hedge.getTotalHedgeEvents();
     await openPool(hedge, signers.creator, eventId);
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
-    // $25 creation fee + ($5 hedger fee − $0.25 creator loyalty) = $29.75
-    expect(await hedge.getHedgePlatformFees()).to.equal(29n * ONE_USDC + 750_000n);
+    // $25 creation fee + net hedger fee ($1.25 − 5% creator loyalty = $1.1875) = $26.1875
+    expect(await hedge.getHedgePlatformFees()).to.equal(26_187_500n);
   });
 
   it("getEventPaymentToken reverts for unknown event, returns USDC for default events", async function () {

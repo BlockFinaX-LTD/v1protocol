@@ -72,8 +72,8 @@ describe("HedgeFacet.claimPayout — guards & happy path", function () {
     const before = await usdc.balanceOf(signers.hedger1.address);
     await expect(hedge.connect(signers.hedger1).claimPayout(positionId))
       .to.emit(hedge, "PayoutClaimed");
-    // $50 gross − 1% payout fee = $49.50 net
-    expect(await usdc.balanceOf(signers.hedger1.address) - before).to.equal(49n * ONE_USDC + 500_000n);
+    // $50 gross − 2% payout fee = $49.00 net
+    expect(await usdc.balanceOf(signers.hedger1.address) - before).to.equal(49n * ONE_USDC);
 
     const pos = await hedge.getHedgePosition(positionId);
     expect(pos.status).to.equal(PositionStatus.Claimed);
@@ -89,8 +89,8 @@ describe("HedgeFacet.claimPayout — guards & happy path", function () {
     const before = (await hedge.getHedgeEventStats(eventId)).creatorEarnings;
     await hedge.connect(signers.hedger1).claimPayout(positionId);
     const after = (await hedge.getHedgeEventStats(eventId)).creatorEarnings;
-    // payoutFee = $50 × 1% = $0.50; creator loyalty = 5% of that = $0.025
-    expect(after - before).to.equal(25_000n);
+    // payoutFee = $50 × 2% = $1.00; creator loyalty = 5% of that = $0.05
+    expect(after - before).to.equal(50_000n);
   });
 });
 
@@ -225,9 +225,9 @@ describe("HedgeFacet.withdrawCreatorEarnings", function () {
 
   it("transfers accrued earnings and zeroes the balance", async function () {
     const { hedge, signers, usdc } = await loadFixture(deployDiamondFixture);
-    const { eventId } = await setup(hedge, signers); // one buy → $0.25 creator loyalty from the $5 platform fee
+    const { eventId } = await setup(hedge, signers); // one buy → creator loyalty = 5% of the $1.25 platform fee
     const earnings = (await hedge.getHedgeEventStats(eventId)).creatorEarnings;
-    expect(earnings).to.equal(250_000n);
+    expect(earnings).to.equal(62_500n);
 
     const before = await usdc.balanceOf(signers.creator.address);
     await expect(hedge.connect(signers.creator).withdrawCreatorEarnings(eventId))

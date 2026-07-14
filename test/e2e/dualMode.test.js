@@ -105,8 +105,8 @@ describe("E2E: dual-mode coexistence — single-strike + range in same Diamond",
     const balH2Before = await usdc.balanceOf(signers.hedger2.address);
     await hedge.connect(signers.hedger1).claimPayout(pos1.id);
     await hedge.connect(signers.hedger2).claimPayout(pos2.id);
-    expect(await usdc.balanceOf(signers.hedger1.address) - balH1Before).to.equal(99n * ONE_USDC);  // $100 - 1%
-    expect(await usdc.balanceOf(signers.hedger2.address) - balH2Before).to.equal( 49n * ONE_USDC + 500_000n); // $49.50
+    expect(await usdc.balanceOf(signers.hedger1.address) - balH1Before).to.equal(98n * ONE_USDC);  // $100 - 2%
+    expect(await usdc.balanceOf(signers.hedger2.address) - balH2Before).to.equal( 49n * ONE_USDC); // $50 - 2%
   });
 
   it("LPs in each event absorb only their own event's loss (events are isolated)", async function () {
@@ -154,15 +154,15 @@ describe("E2E: dual-mode coexistence — single-strike + range in same Diamond",
 
     // Creator (sole LP for digital event):
     //   capital: $10K - $100 loss = $9,900
-    //   premium: $25 - $0.25 fee = $24.75
-    //   total received: $9,924.75
-    expect(c1 - c0).to.equal(9_924_750_000n);
+    //   premium: $25 - 2% fee ($0.50) = $24.50
+    //   total received: $9,924.50
+    expect(c1 - c0).to.equal(9_924_500_000n);
 
     // LP1 (sole LP for range event):
     //   capital: $10K - $50 loss = $9,950
-    //   premium: $25 - $0.25 fee = $24.75
-    //   total received: $9,974.75
-    expect(l1 - l0).to.equal(9_974_750_000n);
+    //   premium: $25 - 2% fee ($0.50) = $24.50
+    //   total received: $9,974.50
+    expect(l1 - l0).to.equal(9_974_500_000n);
 
     // The two amounts differ by exactly $50 — the difference between the digital
     // payoff ($100) and the mid-range payoff ($50) at settlement = 11.5. The events

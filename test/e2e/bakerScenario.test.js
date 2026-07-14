@@ -135,14 +135,14 @@ describe("E2E: Baker scenario — three settlement outcomes", function () {
       // Baker P&L: paid $30, got $0 → -$30
       expect(balsAfter.baker).to.equal(balsBefore.baker);
 
-      // LP1: deposited $5K, gets back $5K + premium share ≈ $8.33 gross / $8.247 net (1% LP fee).
+      // LP1: deposited $5K, gets back $5K + premium share ($8.33 gross − 2% LP fee = $8.1634 net).
       const lp1Gain = balsAfter.lp1 - balsBefore.lp1;
-      near(lp1Gain, 5_008_246_700n);
+      near(lp1Gain, 5_008_163_400n);
 
-      // Creator: deposited $10K, gets back $10K + premium share ($16.493 net) + creator earnings
-      // (~$0.262 from buy 5%-loyalty cut plus 5% of LP-fee-on-premium claims from both LPs).
+      // Creator: deposited $10K, gets back $10K + premium share ($16.327 net) + creator earnings
+      // (5% loyalty of the hedger fee + of both LP premium-claim fees).
       const creatorGain = balsAfter.creator - balsBefore.creator;
-      near(creatorGain, 10_016_755_895n);
+      near(creatorGain, 10_016_414_290n);
     });
   });
 
@@ -177,17 +177,17 @@ describe("E2E: Baker scenario — three settlement outcomes", function () {
         lp1:     await usdc.balanceOf(signers.lp1.address),
       };
 
-      // Baker received $49.50 net ($50 gross - 1% fee).
+      // Baker received $49.00 net ($50 gross - 2% fee).
       const bakerGain = balsAfter.baker - balsBefore.baker;
-      expect(bakerGain).to.equal(49_500_000n);
+      expect(bakerGain).to.equal(49_000_000n);
 
-      // LP1 share of $50 loss = $50 × 5K/15K = $16.666 (truncated). Capital back $4,983.333 + premium $8.247.
+      // LP1 share of $50 loss = $50 × 5K/15K = $16.666 (truncated). Capital back $4,983.333 + premium $8.1634 net.
       const lp1Gain = balsAfter.lp1 - balsBefore.lp1;
-      near(lp1Gain, 4_991_580_034n);
+      near(lp1Gain, 4_991_496_734n);
 
-      // Creator: $10K - $33.333 loss + $16.493 premium net + $0.287 earnings (buy + payoutFee + premium-fee cuts)
+      // Creator: $10K - $33.333 loss + $16.327 premium net + earnings (buy + payoutFee + premium-fee 5% cuts)
       const creatorGain = balsAfter.creator - balsBefore.creator;
-      near(creatorGain, 9_983_447_562n);
+      near(creatorGain, 9_983_130_957n);
     });
   });
 
@@ -220,17 +220,17 @@ describe("E2E: Baker scenario — three settlement outcomes", function () {
         lp1:     await usdc.balanceOf(signers.lp1.address),
       };
 
-      // Baker received $99 net.
+      // Baker received $98 net ($100 gross - 2% fee).
       const bakerGain = balsAfter.baker - balsBefore.baker;
-      expect(bakerGain).to.equal(99_000_000n);
+      expect(bakerGain).to.equal(98_000_000n);
 
-      // LP1 share of $100 loss = $100 × 5K/15K = $33.333 (truncated). Capital $4,966.667 + premium $8.247.
+      // LP1 share of $100 loss = $100 × 5K/15K = $33.333 (truncated). Capital $4,966.667 + premium $8.1634 net.
       const lp1Gain = balsAfter.lp1 - balsBefore.lp1;
-      near(lp1Gain, 4_974_913_367n);
+      near(lp1Gain, 4_974_830_067n);
 
-      // Creator: $10K - $66.667 loss + $16.493 premium + $0.312 earnings (buy + bigger payoutFee + premium-fee cuts)
+      // Creator: $10K - $66.667 loss + $16.327 premium + earnings (buy + bigger payoutFee + premium-fee 5% cuts)
       const creatorGain = balsAfter.creator - balsBefore.creator;
-      near(creatorGain, 9_950_139_229n);
+      near(creatorGain, 9_949_847_624n);
     });
 
     it("does NOT exceed the maximum loss (100 USDC) regardless of settlement price", async function () {
@@ -240,7 +240,7 @@ describe("E2E: Baker scenario — three settlement outcomes", function () {
       await hedge.connect(signers.oracleAdmin).settleEvent(eventId, rate(100));
       const positionId = (await hedge.getEventPositionIds(eventId))[0];
       await hedge.connect(signers.hedger1).claimPayout(positionId);
-      expect(await usdc.balanceOf(signers.hedger1.address) - balsBefore).to.equal(99_000_000n);
+      expect(await usdc.balanceOf(signers.hedger1.address) - balsBefore).to.equal(98_000_000n);
     });
   });
 
