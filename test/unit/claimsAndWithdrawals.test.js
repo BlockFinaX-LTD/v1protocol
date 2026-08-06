@@ -225,9 +225,11 @@ describe("HedgeFacet.withdrawCreatorEarnings", function () {
 
   it("transfers accrued earnings and zeroes the balance", async function () {
     const { hedge, signers, usdc } = await loadFixture(deployDiamondFixture);
-    const { eventId } = await setup(hedge, signers); // one buy → $0.25 creator loyalty from the $5 platform fee
+    // one buy -> platform fee is 0.5% of the $25 premium = $0.125;
+    // creator loyalty is 5% of that = $0.00625
+    const { eventId } = await setup(hedge, signers);
     const earnings = (await hedge.getHedgeEventStats(eventId)).creatorEarnings;
-    expect(earnings).to.equal(250_000n);
+    expect(earnings).to.equal(6_250n);
 
     const before = await usdc.balanceOf(signers.creator.address);
     await expect(hedge.connect(signers.creator).withdrawCreatorEarnings(eventId))
