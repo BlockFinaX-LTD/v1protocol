@@ -5,7 +5,8 @@
  *   - predetermined payout = notional × (cap - strike) / initialRate         (range mode)
  *   - predetermined payout = notional × |strike - initialRate| / initialRate (single-strike mode)
  *   - premium = notional × premiumRate / PRECISION
- *   - platform fee = notional × hedgerFeeRate / PRECISION
+ *   - platform fee = premium × hedgerFeeRate / PRECISION  (charged on the premium,
+ *     not the notional, so it scales with the price of the risk)
  *   - solvency invariant: predeterminedPayout ≤ totalLiquidity − totalMaxPayout
  *   - slippage and deadline guards
  *   - position counter & per-event/per-hedger registration
@@ -52,7 +53,7 @@ describe("HedgeFacet.buyProtection — range mode math", function () {
     expect(pos.notional).to.equal(notional);
   });
 
-  it("computes premium and platformFee from notional × rate", async function () {
+  it("computes premium from notional × rate and platformFee from premium × rate", async function () {
     const { hedge, signers, constants } = await loadFixture(deployDiamondFixture);
     const eventId = await makeOpenEvent(hedge, signers); // premiumRate=2.5%, hedgerFeeRate=0.5%
 
@@ -61,8 +62,28 @@ describe("HedgeFacet.buyProtection — range mode math", function () {
 
     const positionIds = await hedge.getEventPositionIds(eventId);
     const pos = await hedge.getHedgePosition(positionIds[0]);
-    expect(pos.premiumPaid).to.equal(25n * ONE_USDC);     // 2.5% of $1000
-    expect(pos.platformFeePaid).to.equal(5n * ONE_USDC);  // 0.5% of $1000
+    expect(pos.premiumPaid).to.equal(25n * ONE_USDC);     // 2.5% of $1000 notional
+    expect(pos.platformFeePaid).to.equal(125_000n);       // 0.5% of the $25 premium = $0.125
+  });
+
+  // Regression guard. The fee was previously charged on notional, which made it
+  // independent of how the cover was priced — on a 1% premium pool a 5% notional
+  // fee came to 500% of the premium. This asserts the invariant directly rather
+  // than a single hardcoded amount, so the ratio cannot silently drift back.
+  it("charges the platform fee as a fixed share of premium, independent of notional", async function () {
+    const { hedge, signers } = await loadFixture(deployDiamondFixture);
+    const eventId = await makeOpenEvent(hedge, signers); // premiumRate=2.5%, hedgerFeeRate=0.5%
+
+    for (const notional of [500n, 1_000n, 4_000n]) {
+      const id = await makeOpenEvent(hedge, signers);
+      await hedge.connect(signers.hedger1).buyProtection(id, notional * ONE_USDC, MAX_UINT, FAR_FUTURE);
+      const ids = await hedge.getEventPositionIds(id);
+      const pos = await hedge.getHedgePosition(ids[0]);
+
+      // fee / premium must equal hedgerFeeRate (0.5%) at every size.
+      expect(pos.platformFeePaid * 1_000_000n / pos.premiumPaid).to.equal(5_000n);
+    }
+    expect(eventId).to.be.gt(0n);
   });
 
   it("debits the hedger by premium + platformFee total", async function () {
@@ -73,8 +94,8 @@ describe("HedgeFacet.buyProtection — range mode math", function () {
     const notional = 2_000n * ONE_USDC;
     await hedge.connect(signers.hedger1).buyProtection(eventId, notional, MAX_UINT, FAR_FUTURE);
 
-    // 2.5% premium + 0.5% fee = 3% of 2000 = 60
-    const expectedDebit = 60n * ONE_USDC;
+    // premium = 2.5% of 2000 = $50; fee = 0.5% of the $50 premium = $0.25
+    const expectedDebit = 50n * ONE_USDC + 250_000n;
     expect(await usdc.balanceOf(signers.hedger1.address)).to.equal(balBefore - expectedDebit);
   });
 
@@ -136,9 +157,9 @@ describe("HedgeFacet.buyProtection — slippage and deadline guards", function (
   it("reverts when totalCost exceeds the caller's stated _maxCost", async function () {
     const { hedge, signers } = await loadFixture(deployDiamondFixture);
     const eventId = await makeOpenEvent(hedge, signers);
-    // Cost on $1000 notional = $30. Set _maxCost = $29 → revert.
+    // premium $25 + fee (0.5% of premium) $0.125 = $25.125. Set _maxCost = $25 -> revert.
     await expect(hedge.connect(signers.hedger1).buyProtection(
-      eventId, 1_000n * ONE_USDC, 29n * ONE_USDC, FAR_FUTURE
+      eventId, 1_000n * ONE_USDC, 25n * ONE_USDC, FAR_FUTURE
     )).to.be.revertedWith("Cost exceeds slippage limit");
   });
 
@@ -192,11 +213,12 @@ describe("HedgeFacet.buyProtection — creator loyalty + platform fee split", fu
     const { hedge, signers, constants } = await loadFixture(deployDiamondFixture);
     const eventId = await makeOpenEvent(hedge, signers);
 
-    // platformFee on 1000 notional @ 0.5% = $5. creator gets 5% of that = $0.25
+    // premium = 2.5% of $1000 = $25; platformFee = 0.5% of $25 = $0.125.
+    // creator gets 5% of that fee = $0.00625
     await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDC, MAX_UINT, FAR_FUTURE);
 
     const stats = await hedge.getHedgeEventStats(eventId);
-    expect(stats.creatorEarnings).to.equal(250_000n); // $0.25 in 6-dec USDC
+    expect(stats.creatorEarnings).to.equal(6_250n); // $0.00625 in 6-dec USDC
   });
 
   it("aggregates totalPremiums across multiple buys", async function () {

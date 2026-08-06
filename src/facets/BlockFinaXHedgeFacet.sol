@@ -275,7 +275,8 @@ contract BlockFinaXHedgeFacet {
      *      Sets feesInitialized = true on first (and subsequent) calls.
      *
      * @param _eventCreationFee  Flat USDC amount charged to the creator on createEvent() (6 decimals).
-     * @param _hedgerFeeRate     Platform fee on notional charged to hedgers at buyProtection() (fraction of PRECISION).
+     * @param _hedgerFeeRate     Platform fee charged to hedgers at buyProtection(), taken as a
+     *                           fraction of the PREMIUM (not the notional). Fraction of PRECISION.
      * @param _hedgerPayoutFeeRate Platform fee on gross payout deducted at claimPayout() (fraction of PRECISION).
      * @param _lpProfitFeeRate   Platform fee on premium claim deducted at claimPremiums() (fraction of PRECISION).
      * @param _creatorLoyaltyRate Share of every platform fee redirected to the event creator (fraction of PRECISION).
@@ -1075,7 +1076,7 @@ contract BlockFinaXHedgeFacet {
      *      v5+ events have rates snapshotted at creation (feeSnapshotSet = true).
      *      Pre-v5 events fall back to the current global config for backward compatibility.
      *
-     * @return hedgerFeeRate      Platform fee on notional at buyProtection().
+     * @return hedgerFeeRate      Platform fee at buyProtection(), as a fraction of the premium.
      * @return payoutFeeRate      Platform fee on gross payout at claimPayout().
      * @return lpProfitFeeRate    Platform fee on premium claim at claimPremiums().
      * @return creatorLoyaltyRate Share of every platform fee credited to the event creator.
@@ -1270,8 +1271,11 @@ contract BlockFinaXHedgeFacet {
      *
      *      Cost breakdown charged to the hedger:
      *        premium      = notional * premiumRate / PRECISION  (distributed to LPs immediately)
-     *        platform fee = notional * hedgerFeeRate / PRECISION (split: creatorLoyalty + platform)
+     *        platform fee = premium  * hedgerFeeRate / PRECISION (split: creatorLoyalty + platform)
      *        total cost   = premium + platform fee
+     *
+     *      Note the platform fee is a share of the PREMIUM, not of the notional,
+     *      so it scales with the price of the risk rather than the size covered.
      *
      *      Positions are capped at MAX_POSITIONS_PER_EVENT (500) to bound the gas cost
      *      of settleEvent(), which iterates over all positions.
@@ -1335,7 +1339,13 @@ contract BlockFinaXHedgeFacet {
         (uint256 hedgerFeeRate, , , uint256 creatorLoyaltyRate) = _eventFees(evt, s);
 
         uint256 premium = (_notional * evt.premiumRate) / PRECISION;
-        uint256 platformFee = (_notional * hedgerFeeRate) / PRECISION;
+        // The platform fee is charged on the PREMIUM, not the notional. Charging
+        // it on notional made the fee independent of how the cover was priced:
+        // on a pool with a 1% premium, a 5% notional fee came to 500% of the
+        // premium, so the hedger paid far more in fees than for the protection
+        // itself. Pricing the fee off the premium keeps it proportional to the
+        // risk actually being underwritten, whatever the notional size.
+        uint256 platformFee = (premium * hedgerFeeRate) / PRECISION;
         uint256 totalCost = premium + platformFee;
 
         // M-3 fix: slippage guard — revert if actual cost exceeds caller's stated maximum.
@@ -2077,7 +2087,7 @@ contract BlockFinaXHedgeFacet {
     /**
      * @notice Get the current fee configuration.
      * @return eventCreationFee   Flat USDC fee charged on createEvent() (6 decimals).
-     * @return hedgerFeeRate      Platform fee on notional at buyProtection() (fraction of PRECISION).
+     * @return hedgerFeeRate      Platform fee at buyProtection(), as a fraction of the premium (of PRECISION).
      * @return hedgerPayoutFeeRate Platform fee on gross payout at claimPayout() (fraction of PRECISION).
      * @return lpProfitFeeRate    Platform fee on premium claim at claimPremiums() (fraction of PRECISION).
      * @return creatorLoyaltyRate Share of each platform fee redirected to event creator (fraction of PRECISION).

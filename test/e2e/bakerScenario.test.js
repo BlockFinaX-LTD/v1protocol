@@ -140,9 +140,10 @@ describe("E2E: Baker scenario — three settlement outcomes", function () {
       near(lp1Gain, 5_008_246_700n);
 
       // Creator: deposited $10K, gets back $10K + premium share ($16.493 net) + creator earnings
-      // (~$0.262 from buy 5%-loyalty cut plus 5% of LP-fee-on-premium claims from both LPs).
+      // (5%-loyalty cut of the buy fee — now 0.5% of the premium rather than of the
+      // notional, so $0.24375 smaller than before — plus 5% of LP-fee-on-premium claims).
       const creatorGain = balsAfter.creator - balsBefore.creator;
-      near(creatorGain, 10_016_755_895n);
+      near(creatorGain, 10_016_512_145n);
     });
   });
 
@@ -187,7 +188,7 @@ describe("E2E: Baker scenario — three settlement outcomes", function () {
 
       // Creator: $10K - $33.333 loss + $16.493 premium net + $0.287 earnings (buy + payoutFee + premium-fee cuts)
       const creatorGain = balsAfter.creator - balsBefore.creator;
-      near(creatorGain, 9_983_447_562n);
+      near(creatorGain, 9_983_203_812n);
     });
   });
 
@@ -230,7 +231,7 @@ describe("E2E: Baker scenario — three settlement outcomes", function () {
 
       // Creator: $10K - $66.667 loss + $16.493 premium + $0.312 earnings (buy + bigger payoutFee + premium-fee cuts)
       const creatorGain = balsAfter.creator - balsBefore.creator;
-      near(creatorGain, 9_950_139_229n);
+      near(creatorGain, 9_949_895_479n);
     });
 
     it("does NOT exceed the maximum loss (100 USDC) regardless of settlement price", async function () {

@@ -129,8 +129,8 @@ describe("E2E: multi-token (USDT alongside USDC) lifecycle", function () {
       const hUsdtBefore = await usdt.balanceOf(signers.hedger1.address);
       const hUsdcBefore = await usdc.balanceOf(signers.hedger1.address);
       await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDT, MAX_UINT, FAR_FUTURE);
-      // Cost: 2.5% premium + 0.5% platform fee = 3% of $1K = $30 in USDT.
-      expect(hUsdtBefore - await usdt.balanceOf(signers.hedger1.address)).to.equal(30n * ONE_USDT);
+      // Cost: $25 premium (2.5% of $1K) + fee of 0.5% of that premium ($0.125) = $25.125 USDT.
+      expect(hUsdtBefore - await usdt.balanceOf(signers.hedger1.address)).to.equal(25n * ONE_USDT + 125_000n);
       expect(hUsdcBefore - await usdc.balanceOf(signers.hedger1.address)).to.equal(0n);
 
       // Settle in the money (range mid) — European: only at/after expiry.
@@ -163,12 +163,13 @@ describe("E2E: multi-token (USDT alongside USDC) lifecycle", function () {
       await openPool(hedge, signers.creator, eventId);
 
       // creationFee $25 + buyProtection platformFee $5 (0.5% × $1K) = $30 gross USDT fee.
-      // Of the $5 buy fee, 5% creator-loyalty = $0.25 stays as creator earnings; net $4.75 platform.
-      // Total accumulated USDT fees: $25 + $4.75 = $29.75.
+      // The buy fee is 0.5% of the $25 premium = $0.125; 5% creator-loyalty ($0.00625)
+      // stays as creator earnings, so $0.11875 nets to the platform.
+      // Total accumulated USDT fees: $25 creation + $0.11875 = $25.11875.
       await hedge.connect(signers.hedger1).buyProtection(eventId, 1_000n * ONE_USDT, MAX_UINT, FAR_FUTURE);
 
       const usdtFees = await hedge.getPlatformFeesByToken(usdtAddr);
-      expect(usdtFees).to.equal(29n * ONE_USDT + 750_000n);
+      expect(usdtFees).to.equal(25n * ONE_USDT + 118_750n);
 
       // USDC fees are untouched (this protocol has only the USDT event).
       expect(await hedge.getPlatformFeesByToken(addresses.usdc)).to.equal(0n);

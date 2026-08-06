@@ -265,7 +265,7 @@ library LibAppStorage {
      * @notice Protocol fee configuration. All rates use PRECISION = 1e6 as denominator.
      *
      * @param eventCreationFee   Flat USDC amount charged to the creator at createEvent() (6 decimals).
-     * @param hedgerFeeRate      Platform fee on notional charged to hedger at buyProtection().
+     * @param hedgerFeeRate      Platform fee charged to hedger at buyProtection(), as a fraction of the premium.
      *                           E.g. 5000 = 0.5% (5000 / 1e6).
      * @param hedgerPayoutFeeRate Platform fee deducted from gross payout at claimPayout().
      *                           E.g. 10000 = 1%.
