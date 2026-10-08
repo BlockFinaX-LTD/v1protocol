@@ -22,3 +22,7 @@ coverage.json
 .idea/
 *.swp
 *.DS_Store
+
+# Generated local sandbox fixtures
+.sandbox-quote.cjs
+deployments/sandbox-hardhat-*.json
